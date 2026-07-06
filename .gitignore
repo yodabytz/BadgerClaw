@@ -1,0 +1,8 @@
+badgerclaw
+dist/
+*.test
+coverage.out
+.DS_Store
+.env
+.vscode/
+.idea/
