@@ -1587,7 +1587,6 @@ func (s *TUIState) draw() {
 			if s.screen == "threads" {
 				connector = threadItemConnector(item)
 			}
-			subjectW := max(22, width-16-len([]rune(connector)))
 			replyCount := stringify(item["reply_count"])
 			if replyCount == "" || replyCount == "<nil>" {
 				replyCount = "0"
@@ -1600,12 +1599,28 @@ func (s *TUIState) draw() {
 					expandMarker = "+"
 				}
 			}
-			fmt.Printf("%s%s%s %s  %s%s %s\n", prefix, unread, fit(replyCount, 3), expandMarker, muted(connector), muted(fmt.Sprintf("[%v]", item["id"])), amber(fit(cleanInline(stringify(item["subject"])), subjectW)))
-			byline := fmt.Sprintf("%s in %s  replies:%v score:%v useful:%v",
-				firstNonEmpty(cleanInline(stringify(author["display_name"])), cleanInline(stringify(author["username"]))),
-				cleanInline(stringify(group["path"])),
-				item["reply_count"], item["vote_score"], item["useful_count"])
-			fmt.Println("      " + muted(connectorIndent(item)+fit(byline, max(24, width-6-len([]rune(connector))))))
+			name := firstNonEmpty(cleanInline(stringify(author["display_name"])), cleanInline(stringify(author["username"])), "unknown")
+			groupPath := cleanInline(stringify(group["path"]))
+			if s.screen == "threads" {
+				groupPath = ""
+			}
+			meta := name
+			if groupPath != "" {
+				meta += " " + groupPath
+			}
+			meta += fmt.Sprintf(" u:%v", item["useful_count"])
+			metaW := clamp(width/4, 12, 34)
+			subjectW := max(18, width-18-len([]rune(connector))-metaW)
+			fmt.Printf("%s%s%s %s  %s%s %s %s\n",
+				prefix,
+				unread,
+				fit(replyCount, 3),
+				expandMarker,
+				muted(connector),
+				muted(fmt.Sprintf("[%v]", item["id"])),
+				amber(fit(cleanInline(stringify(item["subject"])), subjectW)),
+				muted(fit(meta, metaW)),
+			)
 		}
 	}
 	fmt.Println(muted(strings.Repeat("─", width)))
