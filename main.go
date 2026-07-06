@@ -1477,22 +1477,24 @@ type TUIState struct {
 	title       string
 	current     string
 	selected    int
+	listScroll  int
 	showHeaders bool
 	showAllSubs bool
 	confirmQuit bool
 
-	previousScreen    string
-	previousTitle     string
-	previousItems     []map[string]any
-	previousSelected  int
-	articleRootID     string
-	articleRoot       map[string]any
-	articleNodes      []ArticleNode
-	articleSelected   int
-	articleBodyScroll int
-	articlePageSize   int
-	expandedThreads   map[string]bool
-	expandedGroups    map[string]bool
+	previousScreen     string
+	previousTitle      string
+	previousItems      []map[string]any
+	previousSelected   int
+	previousListScroll int
+	articleRootID      string
+	articleRoot        map[string]any
+	articleNodes       []ArticleNode
+	articleSelected    int
+	articleBodyScroll  int
+	articlePageSize    int
+	expandedThreads    map[string]bool
+	expandedGroups     map[string]bool
 }
 
 type ArticleNode struct {
@@ -1514,21 +1516,30 @@ func (s *TUIState) draw() {
 	}
 	user := firstNonEmpty(s.api.cfg.User, "not logged in")
 	fmt.Printf("%s  %s  %s\n", amber(appName), muted(s.api.cfg.BaseURL), cyan(user))
+	usedRows := 1
 	location := "home"
 	if s.current != "" {
 		location = s.current
 	}
 	fmt.Println(muted(strings.Repeat("─", width)))
+	usedRows++
 	if s.status != "" && !s.statusBarOnly() {
 		fmt.Println(cyan(s.status))
+		usedRows++
 	}
 	if s.title != "" {
 		fmt.Println("\033[1m" + cleanInline(s.title) + "\033[22m")
+		usedRows++
 	}
 	if len(s.items) == 0 {
 		fmt.Println(muted("No items to show. Press g to refresh new subscribed articles, G for the group tree, or s to search."))
+		usedRows++
 	}
-	for i, item := range s.items {
+	listHeight := max(1, height-usedRows-2)
+	s.ensureListSelectionVisible(listHeight)
+	end := min(len(s.items), s.listScroll+listHeight)
+	for i := s.listScroll; i < end; i++ {
+		item := s.items[i]
 		prefix := "  "
 		if i == s.selected {
 			prefix = cyan("> ")
@@ -1788,6 +1799,31 @@ func (s *TUIState) statusBarOnly() bool {
 	return s.status == "quit cancelled"
 }
 
+func (s *TUIState) ensureListSelectionVisible(visibleRows int) {
+	if visibleRows < 1 {
+		visibleRows = 1
+	}
+	if len(s.items) == 0 {
+		s.selected = 0
+		s.listScroll = 0
+		return
+	}
+	s.selected = clamp(s.selected, 0, len(s.items)-1)
+	maxScroll := max(0, len(s.items)-visibleRows)
+	if s.listScroll > maxScroll {
+		s.listScroll = maxScroll
+	}
+	if s.listScroll < 0 {
+		s.listScroll = 0
+	}
+	if s.selected < s.listScroll {
+		s.listScroll = s.selected
+	}
+	if s.selected >= s.listScroll+visibleRows {
+		s.listScroll = s.selected - visibleRows + 1
+	}
+}
+
 func (s *TUIState) loadHome() error {
 	var out map[string]any
 	if err := s.api.get("/api/v1/app/home", url.Values{"per_page": {"20"}}, &out); err != nil {
@@ -1800,6 +1836,7 @@ func (s *TUIState) loadHome() error {
 	s.items = mapsFromSlice(asSlice(feed["data"]))
 	s.status = "home loaded"
 	s.selected = 0
+	s.listScroll = 0
 	return nil
 }
 
@@ -1832,6 +1869,7 @@ func (s *TUIState) loadSubscriptions() error {
 		s.status = "showing only subscribed groups with new articles; press L to show all"
 	}
 	s.selected = 0
+	s.listScroll = 0
 	return nil
 }
 
@@ -1847,6 +1885,7 @@ func (s *TUIState) loadGroups() error {
 	s.current = ""
 	s.status = "group tree loaded; Enter expands branches, O opens a group"
 	s.selected = 0
+	s.listScroll = 0
 	s.expandedGroups = make(map[string]bool)
 	return nil
 }
@@ -1910,6 +1949,7 @@ func (s *TUIState) searchFlow() error {
 	s.title = "Search: " + labels[selected] + " / " + q
 	s.current = ""
 	s.selected = 0
+	s.listScroll = 0
 	s.status = "search results loaded; wildcards are allowed"
 
 	switch types[selected] {
@@ -2173,6 +2213,7 @@ func (s *TUIState) openGroup(path string) error {
 	s.items = items
 	s.status = "inside " + path + "; replies are nested under their root article"
 	s.selected = 0
+	s.listScroll = 0
 	return nil
 }
 
@@ -2181,6 +2222,7 @@ func (s *TUIState) openArticle(id string) error {
 	s.previousTitle = s.title
 	s.previousItems = append([]map[string]any(nil), s.items...)
 	s.previousSelected = s.selected
+	s.previousListScroll = s.listScroll
 	return s.loadArticle(id)
 }
 
@@ -2218,6 +2260,7 @@ func (s *TUIState) closeArticle() error {
 	s.title = s.previousTitle
 	s.items = append([]map[string]any(nil), s.previousItems...)
 	s.selected = clamp(s.previousSelected, 0, max(0, len(s.items)-1))
+	s.listScroll = clamp(s.previousListScroll, 0, max(0, len(s.items)-1))
 	s.articleRoot = nil
 	s.articleNodes = nil
 	s.articleRootID = ""
