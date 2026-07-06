@@ -139,7 +139,7 @@ S            Search
 P            Post to the selected/current group
 C            Mark selected/current group read
 F            Follow up while reading an article
-X            Toggle full headers
+T            Toggle full headers
 ```
 
 Inside a group, root articles are listed newest first. Replies stay nested under

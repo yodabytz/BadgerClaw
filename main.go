@@ -1378,13 +1378,13 @@ func colorizeStatusCommands(text string) string {
 		" C ", " "+amber("C")+" ",
 		" G ", " "+amber("G")+" ",
 		" S ", " "+amber("S")+" ",
+		" T ", " "+amber("T")+" ",
 		" L ", " "+amber("L")+" ",
 		" A ", " "+amber("A")+" ",
 		" U ", " "+amber("U")+" ",
 		" O ", " "+amber("O")+" ",
 		" Q ", " "+amber("Q")+" ",
 		" R ", " "+amber("R")+" ",
-		" X ", " "+amber("X")+" ",
 		" F:", " "+amber("F")+":",
 		" N:", " "+amber("N")+":",
 		" B:", " "+amber("B")+":",
@@ -1634,9 +1634,8 @@ func (s *TUIState) handle(key string) error {
 		return s.subscribeSelected(false)
 	case "s", "/":
 		return s.searchFlow()
-	case "t":
-		id := s.promptInline("post id: ")
-		return openThreadPager(s.api, id, s.showHeaders)
+	case "t", "x":
+		s.toggleHeaders()
 	case "p", "n":
 		return s.postFlow()
 	case "c":
@@ -1709,13 +1708,6 @@ func (s *TUIState) handle(key string) error {
 		return s.openSelected()
 	case "o":
 		return s.openSelected()
-	case "x":
-		s.showHeaders = !s.showHeaders
-		if s.showHeaders {
-			s.status = "headers on; opened posts will show full headers"
-		} else {
-			s.status = "headers off"
-		}
 	case "?":
 		showTUIHelp()
 	default:
@@ -1725,6 +1717,15 @@ func (s *TUIState) handle(key string) error {
 		}
 	}
 	return nil
+}
+
+func (s *TUIState) toggleHeaders() {
+	s.showHeaders = !s.showHeaders
+	if s.showHeaders {
+		s.status = "headers expanded; all opened posts show full headers"
+	} else {
+		s.status = "headers collapsed"
+	}
 }
 
 func (s *TUIState) goBack() error {
@@ -1754,9 +1755,9 @@ func (s *TUIState) statusText(location string) string {
 	case "groups":
 		return "↑/↓ select  Enter expand/open  O open group  + subscribe  - unsubscribe  P post  G refresh  S search  U subscriptions  Q quit"
 	case "threads", "home", "search":
-		return "↑/↓ select  Enter expand/collapse  O open/read  + subscribe  - unsubscribe  P post  R reply by id  G refresh  S search  Q quit  current:" + location
+		return "↑/↓ select  Enter expand/collapse  O open/read  T headers  + subscribe  - unsubscribe  P post  R reply by id  G refresh  S search  Q quit  current:" + location
 	case "article":
-		return "↑/↓ select  Enter open  SPC:PgDn  B:PgUp  + subscribe  - unsubscribe  F:Followup  N:Next  P:Prev  Q:Quit"
+		return "↑/↓ select  T headers  SPC:PgDn  B:PgUp  + subscribe  - unsubscribe  F:Followup  N:Next  P:Prev  Q:Quit"
 	case "search-users", "search-tags":
 		return "↑/↓ select  Enter open where possible  G refresh  S search again  U subscriptions  Q quit"
 	default:
@@ -2236,8 +2237,8 @@ func (s *TUIState) handleArticleKey(key string) error {
 		}
 	case "q":
 		return s.closeArticle()
-	case "x":
-		s.showHeaders = !s.showHeaders
+	case "t", "x":
+		s.toggleHeaders()
 	default:
 		if n, err := strconv.Atoi(key); err == nil && n >= 1 && n <= len(s.articleNodes) {
 			s.articleSelected = n - 1
@@ -2426,7 +2427,7 @@ func showTUIHelp() {
 	fmt.Println("  c              mark selected/current group read")
 	fmt.Println("  m, messages    private messages")
 	fmt.Println("  !, notices     notifications")
-	fmt.Println("  x              toggle post headers when opening articles")
+	fmt.Println("  t              toggle full headers for all opened posts")
 	fmt.Println("  q              quit")
 	fmt.Println()
 	fmt.Println(muted("Posting uses $VISUAL first, then $EDITOR, then nano."))
