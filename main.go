@@ -1376,6 +1376,7 @@ func colorizeStatusCommands(text string) string {
 	replacer := strings.NewReplacer(
 		" P ", " "+amber("P")+" ",
 		" C ", " "+amber("C")+" ",
+		" g ", " "+amber("g")+" ",
 		" G ", " "+amber("G")+" ",
 		" S ", " "+amber("S")+" ",
 		" T ", " "+amber("T")+" ",
@@ -1525,7 +1526,7 @@ func (s *TUIState) draw() {
 		fmt.Println("\033[1m" + cleanInline(s.title) + "\033[22m")
 	}
 	if len(s.items) == 0 {
-		fmt.Println(muted("No items to show. Press s to search, g for group directory, or h for unread feed."))
+		fmt.Println(muted("No items to show. Press g to refresh new subscribed articles, G for the group tree, or s to search."))
 	}
 	for i, item := range s.items {
 		prefix := "  "
@@ -1620,7 +1621,10 @@ func (s *TUIState) handle(key string) error {
 	case "h":
 		return s.loadHome()
 	case "g":
-		return s.refreshCurrent()
+		s.showAllSubs = false
+		return s.loadSubscriptions()
+	case "G":
+		return s.loadGroups()
 	case "L", "l":
 		s.showAllSubs = !s.showAllSubs
 		return s.loadSubscriptions()
@@ -1749,17 +1753,17 @@ func (s *TUIState) statusText(location string) string {
 	switch s.screen {
 	case "subs":
 		if s.showAllSubs {
-			return "↑/↓ select  Enter open group  + subscribe  - unsubscribe  P post  C mark read  G refresh  S search  L unread only  A all groups  Q quit"
+			return "↑/↓ select  Enter open group  + subscribe  - unsubscribe  P post  C mark read  g new groups  G group tree  L unread only  S search  Q quit"
 		}
-		return "↑/↓ select  Enter open group  + subscribe  - unsubscribe  P post  C mark read  G refresh  S search  L show all groups  A all groups  Q quit"
+		return "↑/↓ select  Enter open group  + subscribe  - unsubscribe  P post  C mark read  g refresh  G group tree  L show all  S search  Q quit"
 	case "groups":
-		return "↑/↓ select  Enter expand/open  O open group  + subscribe  - unsubscribe  P post  G refresh  S search  U subscriptions  Q quit"
+		return "↑/↓ select  Enter expand/open  O open group  + subscribe  - unsubscribe  P post  g new groups  G group tree  S search  U subscriptions  Q quit"
 	case "threads", "home", "search":
-		return "↑/↓ select  Enter expand/collapse  O open/read  T headers  + subscribe  - unsubscribe  P post  R reply by id  G refresh  S search  Q quit  current:" + location
+		return "↑/↓ select  Enter expand/collapse  O open/read  T headers  + subscribe  - unsubscribe  P post  R reply by id  g new groups  G group tree  S search  Q quit  current:" + location
 	case "article":
-		return "↑/↓ select  T headers  SPC:PgDn  B:PgUp  + subscribe  - unsubscribe  F:Followup  N:Next  P:Prev  Q:Quit"
+		return "↑/↓ select  T headers  SPC:PgDn  B:PgUp  + subscribe  - unsubscribe  F:Followup  g new groups  G group tree  Q:Quit"
 	case "search-users", "search-tags":
-		return "↑/↓ select  Enter open where possible  G refresh  S search again  U subscriptions  Q quit"
+		return "↑/↓ select  Enter open where possible  g new groups  G group tree  S search again  U subscriptions  Q quit"
 	default:
 		return "↑/↓ select  Enter open  S search  P post  C mark read  Q quit"
 	}
@@ -2232,9 +2236,10 @@ func (s *TUIState) handleArticleKey(key string) error {
 	case "-":
 		return s.subscribeSelected(false)
 	case "g":
-		if s.articleRootID != "" {
-			return s.loadArticle(s.articleRootID)
-		}
+		s.showAllSubs = false
+		return s.loadSubscriptions()
+	case "G":
+		return s.loadGroups()
 	case "q":
 		return s.closeArticle()
 	case "t", "x":
@@ -2417,7 +2422,8 @@ func showTUIHelp() {
 	printTableHeader("RootBadger CLI Help", width)
 	fmt.Println("  u              subscribed groups")
 	fmt.Println("  h              unread home feed")
-	fmt.Println("  g              group directory")
+	fmt.Println("  g              refresh subscribed groups with new articles")
+	fmt.Println("  G              show full collapsed group hierarchy")
 	fmt.Println("  s              search with type choices")
 	fmt.Println("  j / k          move selection down/up")
 	fmt.Println("  enter, o       open selected row")

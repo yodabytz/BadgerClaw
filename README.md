@@ -132,7 +132,8 @@ Left         Go back
 Q            Back, or quit from the subscribed-groups screen
 Y / Enter    Confirm yes when prompted
 N            Confirm no when prompted
-G            Refresh current view
+g            Refresh subscribed groups with new articles
+G            Show the full collapsed group hierarchy
 L            Toggle unread-only/all subscribed groups
 A            Show all groups
 S            Search
