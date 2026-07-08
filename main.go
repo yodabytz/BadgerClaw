@@ -972,16 +972,14 @@ func printThreadList(items []any) {
 
 func printPostTree(post map[string]any, depth int, headers bool) {
 	indent := strings.Repeat("  ", depth)
-	author := asMap(post["author"])
 	fmt.Printf("%s%s %s\n", indent, muted(fmt.Sprintf("[%v]", post["id"])), fit(cleanInline(stringify(post["subject"])), max(30, terminalWidth()-len(indent)-12)))
-	fmt.Printf("%s%s\n", indent, muted(fmt.Sprintf("%s <%s>  %s", firstNonEmpty(cleanInline(stringify(author["display_name"])), cleanInline(stringify(author["username"]))), cleanInline(stringify(author["public_email"])), cleanInline(stringify(post["created_at"])))))
-	if headers {
-		fmt.Println(indent + amber("Headers:"))
-		for k, v := range asMap(post["headers"]) {
-			fmt.Printf("%s  %s: %v\n", indent, k, v)
-		}
+	for _, line := range postHeaderLines(post, headers) {
+		fmt.Println(indent + muted(line))
 	}
-	fmt.Println(indent + wrap(cleanBlock(stringify(post["body"])), max(40, min(96, terminalWidth()-len(indent)-2))))
+	fmt.Println()
+	for _, line := range displayBlockLines(postDisplayText(post), max(40, min(96, terminalWidth()-len(indent)-2))) {
+		fmt.Println(indent + line)
+	}
 	for _, reply := range asSlice(post["replies"]) {
 		fmt.Println()
 		printPostTree(asMap(reply), depth+1, headers)
@@ -1065,9 +1063,172 @@ func saveConfig(cfg Config) error {
 }
 
 func promptLine(label string) string {
-	fmt.Print(label)
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, _ := readEditableLine(label)
 	return strings.TrimSpace(line)
+}
+
+func readEditableLine(label string) (string, error) {
+	fd := int(os.Stdin.Fd())
+	oldState, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		fmt.Print(label)
+		line, readErr := bufio.NewReader(os.Stdin).ReadString('\n')
+		return strings.TrimRight(line, "\r\n"), readErr
+	}
+
+	if err := rawTerminal(fd); err != nil {
+		return "", err
+	}
+	defer restoreTerminalState(fd, oldState)
+
+	reader := bufio.NewReader(os.Stdin)
+	buffer := []rune{}
+	cursor := 0
+	redraw := func() {
+		fmt.Print("\r\033[2K")
+		fmt.Print(label + string(buffer))
+		if move := len(buffer) - cursor; move > 0 {
+			fmt.Printf("\033[%dD", move)
+		}
+	}
+
+	fmt.Print(label)
+	for {
+		r, _, err := reader.ReadRune()
+		if err != nil {
+			return string(buffer), err
+		}
+
+		switch r {
+		case '\r', '\n':
+			fmt.Print("\r\n")
+			return string(buffer), nil
+		case 3:
+			fmt.Print("\r\n")
+			return "", errors.New("cancelled")
+		case 1:
+			cursor = 0
+			redraw()
+		case 5:
+			cursor = len(buffer)
+			redraw()
+		case 4:
+			if cursor < len(buffer) {
+				buffer = append(buffer[:cursor], buffer[cursor+1:]...)
+				redraw()
+			}
+		case 8, 127:
+			if cursor > 0 {
+				buffer = append(buffer[:cursor-1], buffer[cursor:]...)
+				cursor--
+				redraw()
+			}
+		case 27:
+			key := readEditableEscape(reader)
+			switch key {
+			case "left":
+				if cursor > 0 {
+					cursor--
+					redraw()
+				}
+			case "right":
+				if cursor < len(buffer) {
+					cursor++
+					redraw()
+				}
+			case "home":
+				cursor = 0
+				redraw()
+			case "end":
+				cursor = len(buffer)
+				redraw()
+			case "delete":
+				if cursor < len(buffer) {
+					buffer = append(buffer[:cursor], buffer[cursor+1:]...)
+					redraw()
+				}
+			}
+		default:
+			if r < 32 {
+				continue
+			}
+			buffer = append(buffer[:cursor], append([]rune{r}, buffer[cursor:]...)...)
+			cursor++
+			redraw()
+		}
+	}
+}
+
+func readEditableEscape(reader *bufio.Reader) string {
+	r, _, err := reader.ReadRune()
+	if err != nil {
+		return ""
+	}
+	if r != '[' && r != 'O' {
+		return ""
+	}
+	r, _, err = reader.ReadRune()
+	if err != nil {
+		return ""
+	}
+	switch r {
+	case 'A':
+		return "up"
+	case 'B':
+		return "down"
+	case 'C':
+		return "right"
+	case 'D':
+		return "left"
+	case 'H':
+		return "home"
+	case 'F':
+		return "end"
+	}
+	if r < '0' || r > '9' {
+		return ""
+	}
+	var seq []rune
+	seq = append(seq, r)
+	for {
+		r, _, err = reader.ReadRune()
+		if err != nil {
+			return ""
+		}
+		if r == '~' {
+			switch string(seq) {
+			case "1", "7":
+				return "home"
+			case "3":
+				return "delete"
+			case "4", "8":
+				return "end"
+			default:
+				return ""
+			}
+		}
+		if r == 'A' || r == 'B' || r == 'C' || r == 'D' || r == 'H' || r == 'F' {
+			switch r {
+			case 'A':
+				return "up"
+			case 'B':
+				return "down"
+			case 'C':
+				return "right"
+			case 'D':
+				return "left"
+			case 'H':
+				return "home"
+			case 'F':
+				return "end"
+			}
+		}
+		if (r >= '0' && r <= '9') || r == ';' {
+			seq = append(seq, r)
+			continue
+		}
+		return ""
+	}
 }
 
 func promptPasswordTwice() (string, error) {
@@ -2415,27 +2576,131 @@ func (s *TUIState) articleBodyLines(post map[string]any, width int) []string {
 	if len(post) == 0 {
 		return []string{muted("No article selected.")}
 	}
-	author := asMap(post["author"])
-	lines := []string{
-		amber(cleanInline(stringify(post["subject"]))),
-		muted(fmt.Sprintf("From: %s <%s>", firstNonEmpty(cleanInline(stringify(author["display_name"])), cleanInline(stringify(author["username"]))), cleanInline(stringify(author["public_email"])))),
-		muted(fmt.Sprintf("Date: %s  Score:%v  Useful:%v", cleanInline(stringify(post["created_at"])), post["vote_score"], post["useful_count"])),
-		"",
+	lines := make([]string, 0, 16)
+	for _, line := range postHeaderLines(post, s.showHeaders) {
+		lines = append(lines, muted(line))
 	}
-	if paths := stringify(post["group_paths"]); paths != "" && paths != "<nil>" {
-		lines = append(lines, amber("Groups: "+cleanInline(paths)), "")
-	}
-	if s.showHeaders {
-		lines = append(lines, amber("Headers:"))
-		for k, v := range asMap(post["headers"]) {
-			lines = append(lines, muted(fmt.Sprintf("  %s: %v", k, v)))
-		}
-		lines = append(lines, "")
-	}
-	for _, line := range wrapLines(cleanBlock(stringify(post["body"])), max(40, width-2)) {
+	lines = append(lines, "")
+	for _, line := range displayBlockLines(postDisplayText(post), max(40, width-2)) {
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+func postDisplayText(post map[string]any) string {
+	body := normalizeBlock(stringify(post["body"]))
+	signature := normalizeBlock(stringify(post["display_signature"]))
+	if strings.TrimSpace(signature) == "" {
+		return body
+	}
+	if strings.TrimSpace(body) == "" {
+		return signature
+	}
+	return strings.TrimRight(body, "\n") + "\n\n" + signature
+}
+
+func postHeaderLines(post map[string]any, expanded bool) []string {
+	headers := asMap(post["headers"])
+	lines := []string{
+		"From: " + postFromLine(post),
+		fmt.Sprintf("Date: %s   Score: %v   Useful: %v", cleanInline(stringify(post["created_at"])), post["vote_score"], post["useful_count"]),
+	}
+	if !expanded {
+		return lines
+	}
+
+	ordered := []struct {
+		label string
+		value string
+	}{
+		{"Newsgroups", firstNonEmpty(headerValue(headers, "Newsgroups"), formatGroupPaths(post["group_paths"]))},
+		{"Subject", cleanInline(stringify(post["subject"]))},
+		{"Organization", headerValue(headers, "Organization")},
+		{"Message-ID", headerValue(headers, "Message-ID")},
+		{"X-Info", headerValue(headers, "X-Info")},
+		{"User-Agent", firstNonEmpty(headerValue(headers, "User-Agent"), "RootBadger CLI")},
+		{"Lines", firstNonEmpty(headerValue(headers, "Lines"), strconv.Itoa(countDisplayLines(stringify(post["body"]))))},
+		{"X-System", firstNonEmpty(headerValue(headers, "X-System"), "RootBadger/1.0 (privacy-protected)")},
+	}
+
+	for _, item := range ordered {
+		if strings.TrimSpace(item.value) == "" {
+			continue
+		}
+		lines = append(lines, item.label+": "+item.value)
+	}
+	return lines
+}
+
+func postFromLine(post map[string]any) string {
+	if from := headerValue(asMap(post["headers"]), "From"); from != "" {
+		return from
+	}
+	author := asMap(post["author"])
+	name := firstNonEmpty(cleanInline(stringify(author["display_name"])), cleanInline(stringify(author["username"])), "unknown")
+	email := cleanInline(stringify(author["public_email"]))
+	if email == "" {
+		return name
+	}
+	return fmt.Sprintf("%s <%s>", name, email)
+}
+
+func headerValue(headers map[string]any, key string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, key) {
+			return cleanInline(stringify(v))
+		}
+	}
+	return ""
+}
+
+func formatGroupPaths(v any) string {
+	switch value := v.(type) {
+	case []any:
+		return strings.Join(stringSlice(value), ", ")
+	case []string:
+		return strings.Join(value, ", ")
+	default:
+		s := strings.TrimSpace(stringify(value))
+		s = strings.TrimPrefix(s, "[")
+		s = strings.TrimSuffix(s, "]")
+		return strings.Join(strings.Fields(s), ", ")
+	}
+}
+
+func countDisplayLines(s string) int {
+	s = normalizeBlock(s)
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
+func normalizeBlock(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.ReplaceAll(s, "\r", "\n")
+}
+
+func displayBlockLines(s string, width int) []string {
+	s = normalizeBlock(s)
+	if s == "" {
+		return nil
+	}
+	width = max(16, width)
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		runes := []rune(line)
+		if len(runes) == 0 {
+			out = append(out, "")
+			continue
+		}
+		for len(runes) > width {
+			out = append(out, string(runes[:width]))
+			runes = runes[width:]
+		}
+		out = append(out, string(runes))
+	}
+	return out
 }
 
 func flattenArticleNodes(root map[string]any) []ArticleNode {
@@ -2521,8 +2786,7 @@ func mapsFromSlice(items []any) []map[string]any {
 func (s *TUIState) promptInline(label string) string {
 	var out string
 	_ = withNormalTerminal(func() error {
-		fmt.Print("\n" + label)
-		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		line, _ := readEditableLine("\n" + label)
 		out = strings.TrimSpace(strings.TrimRight(line, "\r\n"))
 		return nil
 	})
@@ -2530,8 +2794,7 @@ func (s *TUIState) promptInline(label string) string {
 }
 
 func promptInline(label string) string {
-	fmt.Print("\n" + label)
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, _ := readEditableLine("\n" + label)
 	return strings.TrimSpace(strings.TrimRight(line, "\r\n"))
 }
 
