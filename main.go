@@ -453,7 +453,15 @@ func cmdReply(api APIClient, args []string) error {
 	if fs.NArg() < 1 {
 		return errors.New("post id required")
 	}
-	body, err := bodyFromFlagOrEditor(*bodyFile, "Write your reply. Save and close to review.\n")
+	initial := ""
+	var err error
+	if *bodyFile == "" && confirmDefaultYes("Quote original? Y/n: ") {
+		initial, err = fetchReplyQuote(api, fs.Arg(0))
+		if err != nil {
+			return err
+		}
+	}
+	body, err := bodyFromFlagOrEditorWithInitial(*bodyFile, "Write your reply. Save and close to review.\n", initial)
 	if err != nil {
 		return err
 	}
@@ -1262,6 +1270,10 @@ func readSecret(label string) (string, error) {
 }
 
 func bodyFromFlagOrEditor(path, intro string) (string, error) {
+	return bodyFromFlagOrEditorWithInitial(path, intro, "")
+}
+
+func bodyFromFlagOrEditorWithInitial(path, intro, initial string) (string, error) {
 	if path != "" {
 		b, err := os.ReadFile(path)
 		return string(b), err
@@ -1273,6 +1285,11 @@ func bodyFromFlagOrEditor(path, intro string) (string, error) {
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.WriteString("<!-- " + intro + "Lines inside this comment are ignored. -->\n\n"); err != nil {
 		return "", err
+	}
+	if strings.TrimSpace(initial) != "" {
+		if _, err := tmp.WriteString(strings.TrimRight(initial, "\n") + "\n\n"); err != nil {
+			return "", err
+		}
 	}
 	_ = tmp.Close()
 	editor := preferredEditor()
@@ -1292,6 +1309,18 @@ func bodyFromFlagOrEditor(path, intro string) (string, error) {
 		return "", errors.New("empty body")
 	}
 	return body, nil
+}
+
+func fetchReplyQuote(api APIClient, postID string) (string, error) {
+	var out map[string]any
+	if err := api.get("/api/v1/app/posts/"+url.PathEscape(postID)+"/quote", nil, &out); err != nil {
+		return "", err
+	}
+	quote := normalizeBlock(stringify(asMap(out["data"])["quote"]))
+	if strings.TrimSpace(quote) == "" {
+		return "", errors.New("server returned an empty quote")
+	}
+	return quote, nil
 }
 
 func preferredEditor() string {
@@ -2097,6 +2126,7 @@ func (s *TUIState) searchFlow() error {
 		return err
 	}
 
+	s.status = "search type: " + labels[selected]
 	q := s.promptInline("search " + labels[selected] + ": ")
 	if q == "" {
 		return errors.New("search cancelled")
@@ -2479,10 +2509,18 @@ func (s *TUIState) followupSelectedArticle() error {
 	post := s.articleNodes[s.articleSelected].Post
 	id := stringify(post["id"])
 	clearScreen()
+	initial := ""
+	if confirmDefaultYes("Quote original? Y/n: ") {
+		quote, err := fetchReplyQuote(s.api, id)
+		if err != nil {
+			return err
+		}
+		initial = quote
+	}
 	var body string
 	err := withNormalTerminal(func() error {
 		var bodyErr error
-		body, bodyErr = bodyFromFlagOrEditor("", "Write your followup. Save and close to review.\n")
+		body, bodyErr = bodyFromFlagOrEditorWithInitial("", "Write your followup. Save and close to review.\n", initial)
 		return bodyErr
 	})
 	if err != nil {
@@ -2558,14 +2596,15 @@ func (s *TUIState) threadPaneLines(width int) []string {
 		author := asMap(post["author"])
 		name := firstNonEmpty(cleanInline(stringify(author["display_name"])), cleanInline(stringify(author["username"])), "unknown")
 		subject := cleanInline(stringify(post["subject"]))
-		byline := muted("by " + name)
-		subjectW := max(16, width-len([]rune(connector))-14)
+		byline := "by " + name
+		bylineW := clamp(width/4, 14, 30)
+		subjectW := max(10, width-len([]rune(connector))-bylineW-18)
 		line := fmt.Sprintf("%s%s%s %s  %s",
 			prefix,
 			muted(connector),
 			cyan(fit(fmt.Sprintf("[%v]", post["id"]), 8)),
-			amber(fit(subject, max(8, subjectW-len([]rune("  by "+name))))),
-			byline,
+			amber(fit(subject, subjectW)),
+			muted(fit(byline, bylineW)),
 		)
 		lines = append(lines, line)
 	}
@@ -2786,7 +2825,9 @@ func mapsFromSlice(items []any) []map[string]any {
 func (s *TUIState) promptInline(label string) string {
 	var out string
 	_ = withNormalTerminal(func() error {
-		line, _ := readEditableLine("\n" + label)
+		fmt.Printf("\033[%d;1H%s", terminalHeight(), strings.Repeat(" ", terminalWidth()))
+		fmt.Printf("\033[%d;1H", terminalHeight())
+		line, _ := readEditableLine(label)
 		out = strings.TrimSpace(strings.TrimRight(line, "\r\n"))
 		return nil
 	})
