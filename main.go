@@ -1320,7 +1320,7 @@ func fetchReplyQuote(api APIClient, postID string) (string, error) {
 	if strings.TrimSpace(quote) == "" {
 		return "", errors.New("server returned an empty quote")
 	}
-	return quote, nil
+	return wrapNewsreaderText(quote, 80), nil
 }
 
 func preferredEditor() string {
@@ -2620,7 +2620,7 @@ func (s *TUIState) articleBodyLines(post map[string]any, width int) []string {
 		lines = append(lines, muted(line))
 	}
 	lines = append(lines, "")
-	for _, line := range displayBlockLines(postDisplayText(post), max(40, width-2)) {
+	for _, line := range displayBlockLines(postDisplayText(post), min(80, max(40, width-2))) {
 		lines = append(lines, line)
 	}
 	return lines
@@ -2725,21 +2725,138 @@ func displayBlockLines(s string, width int) []string {
 	if s == "" {
 		return nil
 	}
-	width = max(16, width)
+	width = clamp(width, 16, 80)
 	var out []string
 	for _, line := range strings.Split(s, "\n") {
-		runes := []rune(line)
-		if len(runes) == 0 {
-			out = append(out, "")
-			continue
-		}
-		for len(runes) > width {
-			out = append(out, string(runes[:width]))
-			runes = runes[width:]
-		}
-		out = append(out, string(runes))
+		out = append(out, wrapNewsreaderLine(line, width)...)
 	}
 	return out
+}
+
+func wrapNewsreaderText(s string, width int) string {
+	s = normalizeBlock(s)
+	if s == "" {
+		return ""
+	}
+	width = clamp(width, 16, 80)
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, wrapNewsreaderLine(line, width)...)
+	}
+	return strings.Join(out, "\n")
+}
+
+func wrapNewsreaderLine(line string, width int) []string {
+	width = clamp(width, 16, 80)
+	if line == "" {
+		return []string{""}
+	}
+
+	prefix, content := quotePrefix(line)
+	available := width - runeLen(prefix)
+	if available < 12 {
+		available = max(12, width)
+		prefix = ""
+		content = strings.TrimSpace(line)
+	}
+
+	wrapped := wrapWords(content, available)
+	if len(wrapped) == 0 {
+		return []string{strings.TrimRight(prefix, " ")}
+	}
+
+	out := make([]string, 0, len(wrapped))
+	for _, part := range wrapped {
+		out = append(out, prefix+part)
+	}
+	return out
+}
+
+func quotePrefix(line string) (string, string) {
+	trimmedLeft := strings.TrimLeft(line, " \t")
+	if !strings.HasPrefix(trimmedLeft, ">") {
+		return "", strings.TrimRight(line, " \t")
+	}
+
+	depth := 0
+	i := 0
+	for i < len(trimmedLeft) {
+		if trimmedLeft[i] != '>' {
+			break
+		}
+		depth++
+		i++
+		for i < len(trimmedLeft) && (trimmedLeft[i] == ' ' || trimmedLeft[i] == '\t') {
+			i++
+		}
+	}
+	if depth <= 0 {
+		return "", strings.TrimRight(line, " \t")
+	}
+	if depth > 5 {
+		depth = 5
+	}
+	return strings.Repeat(">", depth) + " ", strings.TrimSpace(trimmedLeft[i:])
+}
+
+func wrapWords(s string, width int) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	width = max(1, width)
+
+	words := strings.Fields(s)
+	lines := make([]string, 0, max(1, len(s)/width))
+	current := ""
+	for _, word := range words {
+		if current == "" {
+			for runeLen(word) > width {
+				lines = append(lines, takeRunes(word, width))
+				word = dropRunes(word, width)
+			}
+			current = word
+			continue
+		}
+
+		if runeLen(current)+1+runeLen(word) <= width {
+			current += " " + word
+			continue
+		}
+
+		lines = append(lines, current)
+		current = ""
+		for runeLen(word) > width {
+			lines = append(lines, takeRunes(word, width))
+			word = dropRunes(word, width)
+		}
+		current = word
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	return lines
+}
+
+func runeLen(s string) int {
+	return len([]rune(s))
+}
+
+func takeRunes(s string, n int) string {
+	runes := []rune(s)
+	if n >= len(runes) {
+		return s
+	}
+	return string(runes[:n])
+}
+
+func dropRunes(s string, n int) string {
+	runes := []rune(s)
+	if n >= len(runes) {
+		return ""
+	}
+	return string(runes[n:])
 }
 
 func flattenArticleNodes(root map[string]any) []ArticleNode {
