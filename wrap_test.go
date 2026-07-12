@@ -99,3 +99,21 @@ func TestCompactAPIErrorStillPrefersJSONMessage(t *testing.T) {
 		t.Fatalf("JSON message regressed: %q", got)
 	}
 }
+
+func TestRequestLabelIsFriendly(t *testing.T) {
+	cases := map[[2]string]string{
+		{"GET", "/api/v1/app/subscriptions"}:            "Fetching subscriptions…",
+		{"DELETE", "/api/v1/app/groups/rb.x/subscribe"}: "Unsubscribing on rootbadger…",
+		{"POST", "/api/v1/app/groups/rb.x/subscribe"}:   "Subscribing on rootbadger…",
+		{"GET", "/api/v1/app/threads/123"}:              "Fetching thread…",
+		{"PUT", "/api/v1/app/profile"}:                  "Saving profile…",
+	}
+	for k, want := range cases {
+		if got := requestLabel(k[0], k[1]); got != want {
+			t.Errorf("requestLabel(%q,%q) = %q, want %q", k[0], k[1], got, want)
+		}
+	}
+	if requestLabel("GET", "/api/v1/unknown") != "Loading…" {
+		t.Error("unknown GET should fall back to Loading")
+	}
+}

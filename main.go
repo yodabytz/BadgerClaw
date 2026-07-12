@@ -45,6 +45,9 @@ type Config struct {
 type APIClient struct {
 	cfg    Config
 	client *http.Client
+	// onRequest, when set, is called just before each HTTP request so an
+	// interactive client can show live activity (fetching, updating, ...).
+	onRequest func(method, path string)
 }
 
 type APIError struct {
@@ -1384,6 +1387,9 @@ func (api APIClient) do(method, path string, params url.Values, body any, auth b
 	if err != nil {
 		return err
 	}
+	if api.onRequest != nil {
+		api.onRequest(method, path)
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgentName+"/"+version+" badgerclaw")
 	if body != nil {
@@ -2389,8 +2395,69 @@ func clamp(v, low, high int) int {
 	return min(max(v, low), high)
 }
 
+// progress paints the status bar row immediately, so an action shows its
+// activity during the blocking request that follows, before the next redraw.
+func (s *TUIState) progress(msg string) {
+	if msg == "" {
+		return
+	}
+	s.status = msg
+	fmt.Printf("\033[%d;1H%s", terminalHeight(), statusBar(cleanInline(msg), terminalWidth()))
+}
+
+// requestLabel turns a request into a short status message.
+func requestLabel(method, path string) string {
+	host := "rootbadger"
+	switch {
+	case strings.Contains(path, "/subscribe"):
+		if method == "DELETE" {
+			return "Unsubscribing on " + host + "\u2026"
+		}
+		return "Subscribing on " + host + "\u2026"
+	case strings.Contains(path, "/subscriptions"):
+		return "Fetching subscriptions\u2026"
+	case strings.Contains(path, "/threads/"):
+		return "Fetching thread\u2026"
+	case strings.Contains(path, "/threads"):
+		return "Fetching articles\u2026"
+	case strings.Contains(path, "/read"):
+		return "Marking read\u2026"
+	case strings.Contains(path, "/posts") && method == "POST":
+		return "Posting\u2026"
+	case strings.Contains(path, "/replies") && method == "POST":
+		return "Sending reply\u2026"
+	case strings.Contains(path, "/messages"):
+		if method == "POST" {
+			return "Sending message\u2026"
+		}
+		return "Fetching messages\u2026"
+	case strings.Contains(path, "/notifications"):
+		return "Fetching notifications\u2026"
+	case strings.Contains(path, "/search"):
+		return "Searching\u2026"
+	case strings.Contains(path, "/profile"):
+		if method == "GET" {
+			return "Fetching profile\u2026"
+		}
+		return "Saving profile\u2026"
+	case strings.Contains(path, "/groups"):
+		return "Fetching groups\u2026"
+	case strings.Contains(path, "/home"):
+		return "Fetching home feed\u2026"
+	}
+	switch method {
+	case "GET":
+		return "Loading\u2026"
+	default:
+		return "Working\u2026"
+	}
+}
+
 func runTUI(api APIClient) error {
 	state := &TUIState{api: api, screen: "subs", title: "Subscribed Groups", selected: 0}
+	state.api.onRequest = func(method, path string) {
+		state.progress(requestLabel(method, path))
+	}
 	if api.cfg.Token == "" {
 		state.status = "not logged in; run badgerclaw login first"
 	} else if err := state.loadSubscriptions(); err != nil {
@@ -2563,7 +2630,7 @@ func (s *TUIState) draw() {
 			author := asMap(item["author"])
 			group := asMap(item["group"])
 			unread := " "
-			if truthy(item["is_unread"]) {
+			if truthy(item["is_unread"]) || hasUnreadChild(item) {
 				unread = cyan("*")
 			}
 			connector := ""
@@ -3145,8 +3212,35 @@ func (s *TUIState) subscribeSelected(add bool) error {
 	if err != nil {
 		return err
 	}
+
+	// On unsubscribe, drop the group from the list right away so it does not
+	// linger as a stale row until the next refresh.
+	if !add && (s.screen == "subs" || s.screen == "groups") {
+		s.items = removeGroupItem(s.items, group)
+		if s.selected >= len(s.items) {
+			s.selected = max(0, len(s.items)-1)
+		}
+		s.status = firstNonEmpty(cleanInline(stringify(out["message"])), "unsubscribed from "+group)
+		return nil
+	}
+
 	s.status = firstNonEmpty(cleanInline(stringify(out["message"])), "subscription updated")
 	return nil
+}
+
+// removeGroupItem drops the row for path, plus any of its expanded children.
+func removeGroupItem(items []map[string]any, path string) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if groupPath(item) == path {
+			continue
+		}
+		if stringify(item["_root_item_id"]) == path {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func (s *TUIState) openGroup(path string) error {
@@ -3188,7 +3282,28 @@ func (s *TUIState) openGroup(path string) error {
 			children = append(children, post)
 		}
 		rootPost["_children"] = children
+
+		// If a reply in this thread is unread, expand the thread inline so the
+		// new post (marked with * in the list) is visible without a keypress.
+		hasUnread := false
+		for _, child := range children {
+			if truthy(child["is_unread"]) {
+				hasUnread = true
+				break
+			}
+		}
 		items = append(items, rootPost)
+		if hasUnread {
+			rootPost["_expanded"] = true
+			for _, child := range children {
+				child["_root_item_id"] = rootID
+				items = append(items, child)
+			}
+			if s.expandedThreads == nil {
+				s.expandedThreads = make(map[string]bool)
+			}
+			s.expandedThreads[rootID] = true
+		}
 	}
 	s.screen = "threads"
 	s.title = path + " threads"
@@ -3946,6 +4061,15 @@ func childItems(item map[string]any) []map[string]any {
 	default:
 		return nil
 	}
+}
+
+func hasUnreadChild(item map[string]any) bool {
+	for _, child := range childItems(item) {
+		if truthy(child["is_unread"]) {
+			return true
+		}
+	}
+	return false
 }
 
 func unreadCount(item map[string]any) int {
