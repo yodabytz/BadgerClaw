@@ -132,3 +132,42 @@ func TestFormatTimestamp(t *testing.T) {
 		t.Fatalf("unparseable input should pass through, got %q", got)
 	}
 }
+
+func TestThemeTableComplete(t *testing.T) {
+	if len(themeOrder) != len(themes) {
+		t.Fatalf("themeOrder has %d names, themes map has %d", len(themeOrder), len(themes))
+	}
+	for _, name := range themeOrder {
+		th, ok := themes[name]
+		if !ok {
+			t.Fatalf("theme %q in order list but not in table", name)
+		}
+		for label, v := range map[string]string{"bg": th.Bg, "statusbg": th.StatusBg, "text": th.Text, "accent": th.Accent, "link": th.Link, "muted": th.Muted} {
+			if !strings.HasPrefix(v, "\033[") || !strings.HasSuffix(v, "m") {
+				t.Fatalf("theme %q %s is not an ANSI escape: %q", name, label, v)
+			}
+		}
+	}
+}
+
+func TestApplyTheme(t *testing.T) {
+	defer applyTheme("default")
+	if !applyTheme("dracula") {
+		t.Fatal("dracula should be known")
+	}
+	if activeThemeName != "dracula" || tuiBg != themes["dracula"].Bg {
+		t.Fatal("dracula colors not applied")
+	}
+	if applyTheme("no-such-theme") {
+		t.Fatal("unknown theme must report false")
+	}
+	if activeThemeName != "default" || tuiBg != themes["default"].Bg {
+		t.Fatal("unknown theme must fall back to default")
+	}
+}
+
+func TestHexRGB(t *testing.T) {
+	if got := hexRGB("fe8019"); got != "254;128;25" {
+		t.Fatalf("hexRGB broken: %q", got)
+	}
+}

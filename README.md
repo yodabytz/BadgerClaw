@@ -569,3 +569,19 @@ Or set a default in `~/.config/badgerclaw/config.json`:
 ```
 
 `BADGERCLAW_WRAP=72` overrides both. Use `0` to disable wrapping entirely.
+
+## Themes
+
+Eleven color schemes ship with the client: `default`, `gruvbox-dark`,
+`gruvbox-light`, `tokyonight-storm`, `tokyonight-moon`, `catppuccin-mocha`,
+`nord`, `one-dark`, `dracula`, `nightfox`, and `everforest`.
+
+```sh
+badgerclaw theme            # list, with the active one marked
+badgerclaw theme dracula    # switch
+```
+
+In the TUI, the Theme field in the profile editor (`P`) cycles through the
+schemes and repaints live. The choice is saved in the local config file, so it
+sticks across sessions on this device; it is not part of the server profile
+and needs no standing. Themes other than `default` use 24-bit color.

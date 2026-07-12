@@ -28,19 +28,113 @@ const (
 	userAgentName = "RootBadger CLI"
 	version       = "0.1.0"
 	defaultURL    = "https://rootbadger.com"
-	tuiBg         = "\033[48;5;233m"
-	tuiStatusBg   = "\033[48;5;235m"
-	tuiText       = "\033[38;5;230m"
-	tuiOrange     = "\033[38;5;208m"
-	tuiLink       = "\033[38;5;214m"
-	tuiMuted      = "\033[38;5;245m"
 )
+
+// The active theme's escape codes. Everything the TUI prints goes through
+// these six values (plus the amber/cyan/muted wrappers), so switching theme is
+// just reassigning them. applyTheme sets them from the table below.
+var (
+	tuiBg       = "\033[48;5;233m"
+	tuiStatusBg = "\033[48;5;235m"
+	tuiText     = "\033[38;5;230m"
+	tuiOrange   = "\033[38;5;208m"
+	tuiLink     = "\033[38;5;214m"
+	tuiMuted    = "\033[38;5;245m"
+)
+
+// Theme holds one color scheme as ANSI escape strings.
+type Theme struct {
+	Bg, StatusBg, Text, Accent, Link, Muted string
+}
+
+func bg(hex string) string { return "\033[48;2;" + hexRGB(hex) + "m" }
+func fg(hex string) string { return "\033[38;2;" + hexRGB(hex) + "m" }
+func hexRGB(h string) string {
+	var r, g, b int
+	fmt.Sscanf(h, "%02x%02x%02x", &r, &g, &b)
+	return fmt.Sprintf("%d;%d;%d", r, g, b)
+}
+
+// themeOrder keeps the picker and `badgerclaw theme` listing stable.
+var themeOrder = []string{
+	"default", "gruvbox-dark", "gruvbox-light", "tokyonight-storm",
+	"tokyonight-moon", "catppuccin-mocha", "nord", "one-dark", "dracula",
+	"nightfox", "everforest",
+}
+
+var themes = map[string]Theme{
+	// The original RootBadger scheme, in 256-color codes.
+	"default": {
+		Bg: "\033[48;5;233m", StatusBg: "\033[48;5;235m", Text: "\033[38;5;230m",
+		Accent: "\033[38;5;208m", Link: "\033[38;5;214m", Muted: "\033[38;5;245m",
+	},
+	"gruvbox-dark": {
+		Bg: bg("282828"), StatusBg: bg("3c3836"), Text: fg("ebdbb2"),
+		Accent: fg("fe8019"), Link: fg("8ec07c"), Muted: fg("928374"),
+	},
+	"gruvbox-light": {
+		Bg: bg("fbf1c7"), StatusBg: bg("ebdbb2"), Text: fg("3c3836"),
+		Accent: fg("af3a03"), Link: fg("427b58"), Muted: fg("928374"),
+	},
+	"tokyonight-storm": {
+		Bg: bg("24283b"), StatusBg: bg("1f2335"), Text: fg("c0caf5"),
+		Accent: fg("ff9e64"), Link: fg("7dcfff"), Muted: fg("565f89"),
+	},
+	"tokyonight-moon": {
+		Bg: bg("222436"), StatusBg: bg("1e2030"), Text: fg("c8d3f5"),
+		Accent: fg("ff966c"), Link: fg("86e1fc"), Muted: fg("636da6"),
+	},
+	"catppuccin-mocha": {
+		Bg: bg("1e1e2e"), StatusBg: bg("181825"), Text: fg("cdd6f4"),
+		Accent: fg("fab387"), Link: fg("89dceb"), Muted: fg("6c7086"),
+	},
+	"nord": {
+		Bg: bg("2e3440"), StatusBg: bg("3b4252"), Text: fg("d8dee9"),
+		Accent: fg("d08770"), Link: fg("88c0d0"), Muted: fg("616e88"),
+	},
+	"one-dark": {
+		Bg: bg("282c34"), StatusBg: bg("21252b"), Text: fg("abb2bf"),
+		Accent: fg("d19a66"), Link: fg("56b6c2"), Muted: fg("5c6370"),
+	},
+	"dracula": {
+		Bg: bg("282a36"), StatusBg: bg("44475a"), Text: fg("f8f8f2"),
+		Accent: fg("ffb86c"), Link: fg("8be9fd"), Muted: fg("6272a4"),
+	},
+	"nightfox": {
+		Bg: bg("192330"), StatusBg: bg("212e3f"), Text: fg("cdcecf"),
+		Accent: fg("f4a261"), Link: fg("63cdcf"), Muted: fg("71839b"),
+	},
+	"everforest": {
+		Bg: bg("2d353b"), StatusBg: bg("343f44"), Text: fg("d3c6aa"),
+		Accent: fg("e69875"), Link: fg("83c092"), Muted: fg("859289"),
+	},
+}
+
+// applyTheme switches the active colors. Unknown names keep the default and
+// report false.
+var activeThemeName = "default"
+
+func applyTheme(name string) bool {
+	if name == "" {
+		name = "default"
+	}
+	t, ok := themes[name]
+	if !ok {
+		t = themes["default"]
+		name = "default"
+	}
+	activeThemeName = name
+	tuiBg, tuiStatusBg, tuiText = t.Bg, t.StatusBg, t.Text
+	tuiOrange, tuiLink, tuiMuted = t.Accent, t.Link, t.Muted
+	return ok
+}
 
 type Config struct {
 	BaseURL     string `json:"base_url"`
 	Token       string `json:"token,omitempty"`
 	User        string `json:"user,omitempty"`
 	WrapColumns *int   `json:"wrap_columns,omitempty"`
+	Theme       string `json:"theme,omitempty"`
 }
 
 type APIClient struct {
@@ -68,6 +162,7 @@ func main() {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = envOrDefault("ROOTBADGER_URL", defaultURL)
 	}
+	applyTheme(cfg.Theme)
 	api := APIClient{
 		cfg:    cfg,
 		client: &http.Client{Timeout: 30 * time.Second},
@@ -147,6 +242,8 @@ func main() {
 		err = cmdHeaders(api, os.Args[2:])
 	case "tui":
 		err = runTUI(api)
+	case "theme":
+		err = cmdTheme(os.Args[2:])
 	case "doctor":
 		err = cmdDoctor(api)
 	case "help", "-h", "--help":
@@ -184,6 +281,7 @@ Usage:
   badgerclaw notifications
   badgerclaw profile [USERNAME]
   badgerclaw profile-edit
+  badgerclaw theme [NAME]
   badgerclaw profile-update [--display-name NAME] [--bio TEXT] [--bio-file file]
                             [--website URL] [--interests "a, b"] [--signature TEXT]
                             [--signature-file file] [--organization TEXT] [--x-info TEXT]
@@ -584,6 +682,36 @@ func cmdNotifications(api APIClient, args []string) error {
 		n := asMap(item)
 		fmt.Printf("[%s] %-18s %s\n  %s\n", stringify(n["id"]), stringify(n["type"]), stringify(n["title"]), stringify(n["body"]))
 	}
+	return nil
+}
+
+// cmdTheme lists the color schemes or switches to one. The choice is saved in
+// the local config, so it sticks across sessions and does not touch the
+// server profile.
+func cmdTheme(args []string) error {
+	if len(args) == 0 {
+		for _, name := range themeOrder {
+			t := themes[name]
+			marker := "  "
+			if name == activeThemeName {
+				marker = "* "
+			}
+			fmt.Printf("%s%s%s%s %-18s sample text \033[0m\n", marker, t.Bg, t.Accent, "\u2588\u2588", name)
+		}
+		fmt.Println("\nbadgerclaw theme NAME  switches; the setting is saved locally.")
+		return nil
+	}
+	name := strings.ToLower(strings.TrimSpace(args[0]))
+	if _, ok := themes[name]; !ok {
+		return fmt.Errorf("unknown theme %q; run `badgerclaw theme` for the list", args[0])
+	}
+	applyTheme(name)
+	cfg, _ := loadConfig()
+	cfg.Theme = name
+	if err := saveConfig(cfg); err != nil {
+		return err
+	}
+	fmt.Printf("Theme set to %s.\n", name)
 	return nil
 }
 
@@ -1001,6 +1129,25 @@ func profileFields() []profileField {
 					f.imagePref = "never"
 				}
 				return nil
+			},
+		},
+		{
+			label: "Theme (this device)",
+			display: func(f profileForm) string {
+				return activeThemeName + muted("  local setting, saved immediately")
+			},
+			edit: func(f *profileForm) error {
+				next := 0
+				for i, name := range themeOrder {
+					if name == activeThemeName {
+						next = (i + 1) % len(themeOrder)
+						break
+					}
+				}
+				applyTheme(themeOrder[next])
+				cfg, _ := loadConfig()
+				cfg.Theme = themeOrder[next]
+				return saveConfig(cfg)
 			},
 		},
 		{
@@ -2358,15 +2505,15 @@ func isInteractiveTerminal() bool {
 }
 
 func amber(s string) string {
-	return tuiOrange + s + "\033[39m"
+	return tuiOrange + s + tuiText
 }
 
 func cyan(s string) string {
-	return tuiLink + s + "\033[39m"
+	return tuiLink + s + tuiText
 }
 
 func muted(s string) string {
-	return tuiMuted + s + "\033[39m"
+	return tuiMuted + s + tuiText
 }
 
 func statusBar(text string, width int) string {
@@ -2374,7 +2521,7 @@ func statusBar(text string, width int) string {
 	if text == "" {
 		text = "↑/↓ select  Enter open  Q quit"
 	}
-	return tuiStatusBg + tuiText + colorizeStatusCommands(fit(text, width)) + tuiBg + "\033[39m"
+	return tuiStatusBg + tuiText + colorizeStatusCommands(fit(text, width)) + tuiBg + tuiText
 }
 
 func colorizeStatusCommands(text string) string {
