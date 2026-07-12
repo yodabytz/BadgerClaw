@@ -584,4 +584,10 @@ badgerclaw theme dracula    # switch
 In the TUI, the Theme field in the profile editor (`P`) cycles through the
 schemes and repaints live. The choice is saved in the local config file, so it
 sticks across sessions on this device; it is not part of the server profile
-and needs no standing. Themes other than `default` use 24-bit color.
+and needs no standing.
+
+Colors adapt to the terminal: when it advertises 24-bit support (COLORTERM)
+the exact palette is used, otherwise every color is quantized to the nearest
+xterm-256 entry, so all themes work on any 256-color terminal. Set
+`BADGERCLAW_COLOR=truecolor` or `BADGERCLAW_COLOR=256` to override the
+detection.

@@ -171,3 +171,32 @@ func TestHexRGB(t *testing.T) {
 		t.Fatalf("hexRGB broken: %q", got)
 	}
 }
+
+func TestNearest256(t *testing.T) {
+	// Gruvbox dark background #282828 quantizes to the classic 256-color
+	// value the scheme itself uses.
+	if got := nearest256(0x28, 0x28, 0x28); got != 235 {
+		t.Fatalf("#282828 -> %d, want 235", got)
+	}
+	// Pure cube corners resolve exactly.
+	if got := nearest256(255, 0, 0); got != 196 {
+		t.Fatalf("red -> %d, want 196", got)
+	}
+	if got := nearest256(0, 0, 0); got != 16 && got != 232 {
+		t.Fatalf("black -> %d, want 16 or 232", got)
+	}
+}
+
+func TestColorEmission(t *testing.T) {
+	orig := useTrueColor
+	defer func() { useTrueColor = orig }()
+
+	useTrueColor = true
+	if got := fg("fe8019"); got != "\033[38;2;254;128;25m" {
+		t.Fatalf("truecolor fg: %q", got)
+	}
+	useTrueColor = false
+	if got := fg("fe8019"); !strings.HasPrefix(got, "\033[38;5;") {
+		t.Fatalf("256 fallback fg: %q", got)
+	}
+}

@@ -47,12 +47,89 @@ type Theme struct {
 	Bg, StatusBg, Text, Accent, Link, Muted string
 }
 
-func bg(hex string) string { return "\033[48;2;" + hexRGB(hex) + "m" }
-func fg(hex string) string { return "\033[38;2;" + hexRGB(hex) + "m" }
-func hexRGB(h string) string {
+// useTrueColor decides at startup how theme colors are emitted: exact 24-bit
+// codes when the terminal advertises support, otherwise each color is
+// quantized to the nearest xterm-256 index so every theme works everywhere.
+// BADGERCLAW_COLOR=truecolor or =256 overrides the detection.
+var useTrueColor = trueColorTerminal()
+
+func trueColorTerminal() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("BADGERCLAW_COLOR"))) {
+	case "truecolor", "24bit":
+		return true
+	case "256":
+		return false
+	}
+	ct := strings.ToLower(os.Getenv("COLORTERM"))
+	return strings.Contains(ct, "truecolor") || strings.Contains(ct, "24bit")
+}
+
+func bg(hex string) string {
+	r, g, b := parseHex(hex)
+	if useTrueColor {
+		return fmt.Sprintf("\033[48;2;%d;%d;%dm", r, g, b)
+	}
+	return fmt.Sprintf("\033[48;5;%dm", nearest256(r, g, b))
+}
+
+func fg(hex string) string {
+	r, g, b := parseHex(hex)
+	if useTrueColor {
+		return fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b)
+	}
+	return fmt.Sprintf("\033[38;5;%dm", nearest256(r, g, b))
+}
+
+func parseHex(h string) (int, int, int) {
 	var r, g, b int
 	fmt.Sscanf(h, "%02x%02x%02x", &r, &g, &b)
+	return r, g, b
+}
+
+func hexRGB(h string) string {
+	r, g, b := parseHex(h)
 	return fmt.Sprintf("%d;%d;%d", r, g, b)
+}
+
+// nearest256 maps an RGB color to the closest entry in the xterm-256 palette:
+// the 6x6x6 color cube (16-231) or the grayscale ramp (232-255), whichever is
+// nearer.
+func nearest256(r, g, b int) int {
+	levels := []int{0, 95, 135, 175, 215, 255}
+	nearestLevel := func(v int) int {
+		best, bi := 1<<30, 0
+		for i, l := range levels {
+			if d := (v - l) * (v - l); d < best {
+				best, bi = d, i
+			}
+		}
+		return bi
+	}
+	dist := func(r2, g2, b2 int) int {
+		return (r-r2)*(r-r2) + (g-g2)*(g-g2) + (b-b2)*(b-b2)
+	}
+
+	ri, gi, bi := nearestLevel(r), nearestLevel(g), nearestLevel(b)
+	cubeIdx := 16 + 36*ri + 6*gi + bi
+	cubeDist := dist(levels[ri], levels[gi], levels[bi])
+
+	// Grayscale ramp: 24 entries at brightness 8, 18, ... 238.
+	avg := (r + g + b) / 3
+	gi2 := (avg - 8 + 5) / 10
+	if gi2 < 0 {
+		gi2 = 0
+	}
+	if gi2 > 23 {
+		gi2 = 23
+	}
+	grayLevel := 8 + 10*gi2
+	grayIdx := 232 + gi2
+	grayDist := dist(grayLevel, grayLevel, grayLevel)
+
+	if grayDist < cubeDist {
+		return grayIdx
+	}
+	return cubeIdx
 }
 
 // themeOrder keeps the picker and `badgerclaw theme` listing stable.
