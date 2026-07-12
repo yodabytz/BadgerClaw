@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,9 +36,10 @@ const (
 )
 
 type Config struct {
-	BaseURL string `json:"base_url"`
-	Token   string `json:"token,omitempty"`
-	User    string `json:"user,omitempty"`
+	BaseURL     string `json:"base_url"`
+	Token       string `json:"token,omitempty"`
+	User        string `json:"user,omitempty"`
+	WrapColumns *int   `json:"wrap_columns,omitempty"`
 }
 
 type APIClient struct {
@@ -121,6 +123,8 @@ func main() {
 		err = cmdProfile(api, os.Args[2:])
 	case "profile-update":
 		err = cmdProfileUpdate(api, os.Args[2:])
+	case "profile-edit":
+		err = cmdProfileEdit(api)
 	case "admin":
 		err = cmdAdmin(api)
 	case "admin-section":
@@ -175,7 +179,14 @@ Usage:
   badgerclaw send USERNAME [--body-file file]
   badgerclaw notifications
   badgerclaw profile [USERNAME]
-  badgerclaw profile-update [--display-name NAME] [--bio-file file] [--signature-file file]
+  badgerclaw profile-edit
+  badgerclaw profile-update [--display-name NAME] [--bio TEXT] [--bio-file file]
+                            [--website URL] [--interests "a, b"] [--signature TEXT]
+                            [--signature-file file] [--organization TEXT] [--x-info TEXT]
+                            [--tagline TEXT] [--quote-header TPL] [--show-headers]
+                            [--notify-replies] [--newsletter] [--private]
+                            [--image-attachments click|never]
+                            [--email-display hidden|masked|real|custom] [--email-public ADDR]
   badgerclaw admin
   badgerclaw admin-section users|statistics|proposals|reports|images|private_groups|bans|logs|newsletters|webhooks
   badgerclaw admin-detail SECTION ID
@@ -421,6 +432,7 @@ func cmdNewPost(api APIClient, args []string) error {
 	subject := fs.String("subject", "", "subject")
 	bodyFile := fs.String("body-file", "", "body file")
 	crosspost := fs.String("crosspost", "", "comma separated crosspost groups")
+	wrap := fs.Int("wrap", -1, "hard-wrap column; 0 disables wrapping")
 	_ = fs.Parse(args)
 	if fs.NArg() < 1 {
 		return errors.New("group path required")
@@ -428,7 +440,7 @@ func cmdNewPost(api APIClient, args []string) error {
 	if *subject == "" {
 		*subject = promptLine("Subject: ")
 	}
-	body, err := bodyFromFlagOrEditor(*bodyFile, "Write your post. Save and close to submit.\n")
+	body, err := composeBody(*bodyFile, "Write your post. Save and close to submit.\n", wrapOverride(api, *wrap))
 	if err != nil {
 		return err
 	}
@@ -449,6 +461,7 @@ func cmdNewPost(api APIClient, args []string) error {
 func cmdReply(api APIClient, args []string) error {
 	fs := flag.NewFlagSet("reply", flag.ExitOnError)
 	bodyFile := fs.String("body-file", "", "body file")
+	wrap := fs.Int("wrap", -1, "hard-wrap column; 0 disables wrapping")
 	_ = fs.Parse(args)
 	if fs.NArg() < 1 {
 		return errors.New("post id required")
@@ -461,7 +474,7 @@ func cmdReply(api APIClient, args []string) error {
 			return err
 		}
 	}
-	body, err := bodyFromFlagOrEditorWithInitial(*bodyFile, "Write your reply. Save and close to review.\n", initial)
+	body, err := composeBodyWithInitial(*bodyFile, "Write your reply. Save and close to review.\n", initial, wrapOverride(api, *wrap))
 	if err != nil {
 		return err
 	}
@@ -532,11 +545,12 @@ func cmdMessages(api APIClient, args []string) error {
 func cmdSendMessage(api APIClient, args []string) error {
 	fs := flag.NewFlagSet("send", flag.ExitOnError)
 	bodyFile := fs.String("body-file", "", "body file")
+	wrap := fs.Int("wrap", -1, "hard-wrap column; 0 disables wrapping")
 	_ = fs.Parse(args)
 	if fs.NArg() < 1 {
 		return errors.New("username required")
 	}
-	body, err := bodyFromFlagOrEditor(*bodyFile, "Write your message. Save and close to send.\n")
+	body, err := composeBody(*bodyFile, "Write your message. Save and close to send.\n", wrapOverride(api, *wrap))
 	if err != nil {
 		return err
 	}
@@ -584,57 +598,570 @@ func cmdProfile(api APIClient, args []string) error {
 	return nil
 }
 
+// profileForm holds every profile field the app API lets a user change.
+// The API replaces the whole profile on write: any editable field left out of
+// the request is reset to its default. So every write starts from the current
+// server state, applies just the requested changes, and sends the lot back.
+type profileForm struct {
+	displayName   string
+	bio           string
+	website       string
+	interests     string
+	organization  string
+	xInfo         string
+	signature     string
+	tagline       string
+	quoteHeader   string
+	showHeaders   bool
+	notifyReplies bool
+	newsletter    bool
+	private       bool
+	imagePref     string
+	emailDisplay  string
+	emailPublic   string
+}
+
+func fetchProfileForm(api APIClient) (profileForm, error) {
+	var out map[string]any
+	if err := api.get("/api/v1/app/profile", nil, &out); err != nil {
+		return profileForm{}, err
+	}
+
+	data := asMap(out["data"])
+	user := asMap(data["user"])
+	prefs := asMap(data["preferences"])
+	headers := asMap(data["headers"])
+
+	interests := []string{}
+	for _, item := range asSlice(data["interests"]) {
+		if v := strings.TrimSpace(stringify(item)); v != "" {
+			interests = append(interests, v)
+		}
+	}
+
+	form := profileForm{
+		displayName:   stringify(user["display_name"]),
+		bio:           stringify(user["bio"]),
+		website:       stringify(user["website"]),
+		interests:     strings.Join(interests, ", "),
+		organization:  stringify(headers["organization"]),
+		xInfo:         stringify(headers["x_info"]),
+		signature:     stringify(headers["signature"]),
+		tagline:       stringify(headers["tagline"]),
+		quoteHeader:   stringify(headers["quote_header_template"]),
+		showHeaders:   asBool(prefs["show_headers"]),
+		notifyReplies: asBool(prefs["notify_direct_replies"]),
+		newsletter:    asBool(prefs["newsletter_emails"]),
+		private:       asBool(prefs["is_profile_private"]),
+		imagePref:     stringify(prefs["image_attachment_preference"]),
+		emailDisplay:  stringify(prefs["email_display"]),
+		emailPublic:   stringify(prefs["email_public"]),
+	}
+
+	if form.imagePref != "never" {
+		form.imagePref = "click"
+	}
+	if !validEmailDisplay(form.emailDisplay) {
+		form.emailDisplay = "hidden"
+	}
+	return form, nil
+}
+
+// payload renders the complete profile write body. Empty optional strings are
+// sent as null so the server clears them instead of failing validation on "".
+func (f profileForm) payload() map[string]any {
+	orNull := func(s string) any {
+		if strings.TrimSpace(s) == "" {
+			return nil
+		}
+		return s
+	}
+
+	body := map[string]any{
+		"display_name":                orNull(f.displayName),
+		"bio":                         orNull(f.bio),
+		"website":                     orNull(f.website),
+		"interests_text":              f.interests,
+		"hdr_organization":            orNull(f.organization),
+		"hdr_x_info":                  orNull(f.xInfo),
+		"hdr_x_signature":             orNull(f.signature),
+		"hdr_tagline":                 orNull(f.tagline),
+		"quote_header_template":       orNull(f.quoteHeader),
+		"show_headers":                f.showHeaders,
+		"notify_direct_replies":       f.notifyReplies,
+		"newsletter_emails":           f.newsletter,
+		"is_profile_private":          f.private,
+		"image_attachment_preference": f.imagePref,
+		"email_display":               f.emailDisplay,
+		"email_public":                nil,
+	}
+
+	if f.emailDisplay == "custom" {
+		body["email_public"] = orNull(f.emailPublic)
+	}
+	return body
+}
+
+func saveProfileForm(api APIClient, form profileForm) (map[string]any, error) {
+	var out map[string]any
+	if err := api.post("/api/v1/app/profile", form.payload(), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func validEmailDisplay(v string) bool {
+	switch v {
+	case "hidden", "masked", "real", "custom":
+		return true
+	}
+	return false
+}
+
+func orPlaceholder(s, placeholder string) string {
+	if strings.TrimSpace(s) == "" {
+		return muted(placeholder)
+	}
+	return cleanInline(s)
+}
+
 func cmdProfileUpdate(api APIClient, args []string) error {
 	fs := flag.NewFlagSet("profile-update", flag.ExitOnError)
 	displayName := fs.String("display-name", "", "display name")
-	bioFile := fs.String("bio-file", "", "bio file")
-	signatureFile := fs.String("signature-file", "", "signature file")
+	bio := fs.String("bio", "", "bio text")
+	bioFile := fs.String("bio-file", "", "read bio from a file")
+	website := fs.String("website", "", "website URL")
+	interests := fs.String("interests", "", "comma separated interests")
 	organization := fs.String("organization", "", "Organization header")
 	xinfo := fs.String("x-info", "", "X-Info header")
+	signature := fs.String("signature", "", "signature text")
+	signatureFile := fs.String("signature-file", "", "read signature from a file")
 	tagline := fs.String("tagline", "", "tagline")
+	quoteHeader := fs.String("quote-header", "", "quote header template; must contain {date} and {author}")
 	showHeaders := fs.Bool("show-headers", false, "show posting headers")
+	notifyReplies := fs.Bool("notify-replies", true, "notify on direct replies")
 	newsletter := fs.Bool("newsletter", true, "receive newsletter emails")
+	private := fs.Bool("private", false, "keep the profile private")
+	imagePref := fs.String("image-attachments", "click", "image attachments: click or never")
+	emailDisplay := fs.String("email-display", "hidden", "email display: hidden, masked, real, or custom")
+	emailPublic := fs.String("email-public", "", "custom public email; used with --email-display custom")
 	_ = fs.Parse(args)
 
-	payload := map[string]any{
-		"show_headers":          *showHeaders,
-		"newsletter_emails":     *newsletter,
-		"notify_direct_replies": true,
-	}
-	if *displayName != "" {
-		payload["display_name"] = *displayName
-	}
-	if *organization != "" {
-		payload["hdr_organization"] = *organization
-	}
-	if *xinfo != "" {
-		payload["hdr_x_info"] = *xinfo
-	}
-	if *tagline != "" {
-		payload["hdr_tagline"] = *tagline
-	}
-	if *bioFile != "" {
-		b, err := os.ReadFile(*bioFile)
-		if err != nil {
-			return err
-		}
-		payload["bio"] = string(b)
-	}
-	if *signatureFile != "" {
-		b, err := os.ReadFile(*signatureFile)
-		if err != nil {
-			return err
-		}
-		payload["hdr_x_signature"] = string(b)
+	changed := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { changed[f.Name] = true })
+
+	if len(changed) == 0 {
+		return errors.New("no fields given; run `badgerclaw profile-edit` for the interactive editor, or pass flags such as --display-name")
 	}
 
-	var out map[string]any
-	if err := api.post("/api/v1/app/profile", payload, &out); err != nil {
+	// Start from the current profile so untouched fields survive the write.
+	form, err := fetchProfileForm(api)
+	if err != nil {
 		return err
 	}
+
+	if changed["display-name"] {
+		form.displayName = *displayName
+	}
+	if changed["bio"] {
+		form.bio = *bio
+	}
+	if changed["bio-file"] {
+		b, readErr := os.ReadFile(*bioFile)
+		if readErr != nil {
+			return readErr
+		}
+		form.bio = string(b)
+	}
+	if changed["website"] {
+		form.website = *website
+	}
+	if changed["interests"] {
+		form.interests = *interests
+	}
+	if changed["organization"] {
+		form.organization = *organization
+	}
+	if changed["x-info"] {
+		form.xInfo = *xinfo
+	}
+	if changed["signature"] {
+		form.signature = *signature
+	}
+	if changed["signature-file"] {
+		b, readErr := os.ReadFile(*signatureFile)
+		if readErr != nil {
+			return readErr
+		}
+		form.signature = string(b)
+	}
+	if changed["tagline"] {
+		form.tagline = *tagline
+	}
+	if changed["quote-header"] {
+		form.quoteHeader = *quoteHeader
+	}
+	if changed["show-headers"] {
+		form.showHeaders = *showHeaders
+	}
+	if changed["notify-replies"] {
+		form.notifyReplies = *notifyReplies
+	}
+	if changed["newsletter"] {
+		form.newsletter = *newsletter
+	}
+	if changed["private"] {
+		form.private = *private
+	}
+	if changed["image-attachments"] {
+		if *imagePref != "click" && *imagePref != "never" {
+			return errors.New("--image-attachments must be click or never")
+		}
+		form.imagePref = *imagePref
+	}
+	if changed["email-display"] {
+		if !validEmailDisplay(*emailDisplay) {
+			return errors.New("--email-display must be hidden, masked, real, or custom")
+		}
+		form.emailDisplay = *emailDisplay
+	}
+	if changed["email-public"] {
+		form.emailPublic = *emailPublic
+	}
+
+	out, err := saveProfileForm(api, form)
+	if err != nil {
+		return err
+	}
+
 	fmt.Println(stringify(out["message"]))
 	printJSON(asMap(out["data"])["user"])
 	return nil
+}
+
+type profileField struct {
+	label   string
+	display func(f profileForm) string
+	edit    func(f *profileForm) error
+}
+
+func profileFields() []profileField {
+	return []profileField{
+		{
+			label:   "Display name",
+			display: func(f profileForm) string { return orPlaceholder(f.displayName, "(none)") },
+			edit: func(f *profileForm) error {
+				value, err := profilePrompt("display name: ")
+				if err != nil {
+					return err
+				}
+				f.displayName = value
+				return nil
+			},
+		},
+		{
+			label:   "Bio",
+			display: func(f profileForm) string { return orPlaceholder(firstLine(f.bio), "(none)") },
+			edit: func(f *profileForm) error {
+				body, err := bodyFromFlagOrEditorWithInitial("", "Bio, up to 500 characters. ", f.bio)
+				if err != nil {
+					return err
+				}
+				f.bio = strings.TrimSpace(body)
+				return nil
+			},
+		},
+		{
+			label:   "Website",
+			display: func(f profileForm) string { return orPlaceholder(f.website, "(none)") },
+			edit: func(f *profileForm) error {
+				value, err := profilePrompt("website URL: ")
+				if err != nil {
+					return err
+				}
+				f.website = value
+				return nil
+			},
+		},
+		{
+			label:   "Interests",
+			display: func(f profileForm) string { return orPlaceholder(f.interests, "(none)") },
+			edit: func(f *profileForm) error {
+				value, err := profilePrompt("interests, comma separated: ")
+				if err != nil {
+					return err
+				}
+				f.interests = value
+				return nil
+			},
+		},
+		{
+			label:   "Organization",
+			display: func(f profileForm) string { return orPlaceholder(f.organization, "(none)") },
+			edit: func(f *profileForm) error {
+				value, err := profilePrompt("organization: ")
+				if err != nil {
+					return err
+				}
+				f.organization = value
+				return nil
+			},
+		},
+		{
+			label:   "X-Info",
+			display: func(f profileForm) string { return orPlaceholder(f.xInfo, "(none)") },
+			edit: func(f *profileForm) error {
+				value, err := profilePrompt("x-info: ")
+				if err != nil {
+					return err
+				}
+				f.xInfo = value
+				return nil
+			},
+		},
+		{
+			label:   "Tagline",
+			display: func(f profileForm) string { return orPlaceholder(f.tagline, "(none)") },
+			edit: func(f *profileForm) error {
+				value, err := profilePrompt("tagline: ")
+				if err != nil {
+					return err
+				}
+				f.tagline = value
+				return nil
+			},
+		},
+		{
+			label:   "Signature",
+			display: func(f profileForm) string { return orPlaceholder(firstLine(f.signature), "(none)") },
+			edit: func(f *profileForm) error {
+				body, err := bodyFromFlagOrEditorWithInitial("", "Signature shown under your posts. ", f.signature)
+				if err != nil {
+					return err
+				}
+				f.signature = strings.TrimSpace(body)
+				return nil
+			},
+		},
+		{
+			label:   "Quote header",
+			display: func(f profileForm) string { return orPlaceholder(f.quoteHeader, "(default)") },
+			edit: func(f *profileForm) error {
+				value, err := profilePrompt("quote header, needs {date} and {author}, empty for default: ")
+				if err != nil {
+					return err
+				}
+				f.quoteHeader = value
+				return nil
+			},
+		},
+		{
+			label:   "Show posting headers",
+			display: func(f profileForm) string { return yesNo(f.showHeaders) },
+			edit: func(f *profileForm) error {
+				f.showHeaders = !f.showHeaders
+				return nil
+			},
+		},
+		{
+			label:   "Notify on direct replies",
+			display: func(f profileForm) string { return yesNo(f.notifyReplies) },
+			edit: func(f *profileForm) error {
+				f.notifyReplies = !f.notifyReplies
+				return nil
+			},
+		},
+		{
+			label:   "Newsletter emails",
+			display: func(f profileForm) string { return yesNo(f.newsletter) },
+			edit: func(f *profileForm) error {
+				f.newsletter = !f.newsletter
+				return nil
+			},
+		},
+		{
+			label:   "Private profile",
+			display: func(f profileForm) string { return yesNo(f.private) },
+			edit: func(f *profileForm) error {
+				f.private = !f.private
+				return nil
+			},
+		},
+		{
+			label:   "Image attachments",
+			display: func(f profileForm) string { return f.imagePref },
+			edit: func(f *profileForm) error {
+				if f.imagePref == "never" {
+					f.imagePref = "click"
+				} else {
+					f.imagePref = "never"
+				}
+				return nil
+			},
+		},
+		{
+			label: "Email display",
+			display: func(f profileForm) string {
+				if f.emailDisplay == "custom" {
+					return "custom: " + orPlaceholder(f.emailPublic, "(not set)")
+				}
+				return f.emailDisplay
+			},
+			edit: func(f *profileForm) error {
+				order := []string{"hidden", "masked", "real", "custom"}
+				next := 0
+				for i, v := range order {
+					if v == f.emailDisplay {
+						next = (i + 1) % len(order)
+						break
+					}
+				}
+				f.emailDisplay = order[next]
+				if f.emailDisplay == "custom" {
+					value, err := profilePrompt("public email address: ")
+					if err != nil {
+						return err
+					}
+					f.emailPublic = value
+				}
+				return nil
+			},
+		},
+	}
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if idx := strings.IndexAny(s, "\r\n"); idx >= 0 {
+		return strings.TrimSpace(s[:idx]) + " ..."
+	}
+	return s
+}
+
+// The editor draws with absolute cursor moves and never prints a trailing
+// newline. clearScreen paints every row of the terminal, so a stray newline at
+// the bottom scrolls the whole screen and leaves an unpainted row behind.
+func renderProfileEditor(form profileForm, fields []profileField, dirty bool) {
+	clearScreen()
+	width := terminalWidth()
+	height := terminalHeight()
+
+	lines := []string{
+		amber("Edit Profile"),
+		muted(strings.Repeat("─", max(20, width))),
+		"",
+	}
+	for i, field := range fields {
+		lines = append(lines, fmt.Sprintf("  %2d  %-24s %s", i+1, field.label, field.display(form)))
+	}
+	lines = append(lines, "")
+	if dirty {
+		lines = append(lines, "  unsaved changes")
+	} else {
+		lines = append(lines, muted("  no unsaved changes"))
+	}
+	lines = append(lines, muted("  number = edit that field, s = save, q = cancel"))
+
+	for i, line := range lines {
+		row := i + 1
+		if row >= height {
+			break
+		}
+		fmt.Printf("\033[%d;1H%s%s", row, tuiBg+tuiText, line)
+	}
+}
+
+// profilePrompt reads a line on the bottom row, in place. A read error means
+// stdin closed (Ctrl-D); callers must stop rather than re-prompt, or the editor
+// spins forever on EOF.
+func profilePrompt(label string) (string, error) {
+	width := terminalWidth()
+	height := terminalHeight()
+	fmt.Printf("\033[%d;1H%s%s", height, tuiBg+tuiText, strings.Repeat(" ", width))
+	fmt.Printf("\033[%d;1H", height)
+	line, err := readEditableLine(label)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(strings.TrimRight(line, "\r\n")), nil
+}
+
+// profileNotice shows a message on the bottom row and waits for Enter.
+func profileNotice(message string) {
+	width := terminalWidth()
+	height := terminalHeight()
+	fmt.Printf("\033[%d;1H%s%s", height, tuiBg+tuiText, strings.Repeat(" ", width))
+	fmt.Printf("\033[%d;1H%s%s", height, tuiBg+tuiText, cleanInline(message)+muted("  [Enter]"))
+	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+}
+
+// cmdProfileEdit is the interactive profile editor. It reads the current
+// profile, lets the user change fields one at a time, and only writes when the
+// user saves.
+func cmdProfileEdit(api APIClient) error {
+	form, err := fetchProfileForm(api)
+	if err != nil {
+		return err
+	}
+
+	original := form
+	fields := profileFields()
+	defer func() {
+		fmt.Printf("\033[%d;1H\033[0m\n", terminalHeight())
+	}()
+
+	for {
+		renderProfileEditor(form, fields, form != original)
+
+		raw, promptErr := profilePrompt("choice: ")
+		if promptErr != nil {
+			// stdin closed; leave the profile untouched rather than loop.
+			return nil
+		}
+
+		switch choice := strings.ToLower(raw); choice {
+		case "q", "quit":
+			if form != original {
+				answer, err := profilePrompt("discard unsaved changes? [y/N]: ")
+				if err != nil {
+					return nil
+				}
+				if a := strings.ToLower(answer); a != "y" && a != "yes" {
+					continue
+				}
+			}
+			return nil
+		case "s", "save":
+			if form == original {
+				profileNotice("No changes to save.")
+				continue
+			}
+			out, saveErr := saveProfileForm(api, form)
+			if saveErr != nil {
+				profileNotice(saveErr.Error())
+				continue
+			}
+			original = form
+			profileNotice(stringify(out["message"]))
+			return nil
+		case "":
+			continue
+		default:
+			n, convErr := strconv.Atoi(choice)
+			if convErr != nil || n < 1 || n > len(fields) {
+				continue
+			}
+			if editErr := fields[n-1].edit(&form); editErr != nil {
+				if errors.Is(editErr, io.EOF) {
+					return nil
+				}
+				profileNotice(editErr.Error())
+			}
+		}
+	}
 }
 
 func cmdAdmin(api APIClient) error {
@@ -885,6 +1412,28 @@ func (api APIClient) do(method, path string, params url.Values, body any, auth b
 	return nil
 }
 
+func looksLikeHTML(s string) bool {
+	head := strings.ToLower(strings.TrimSpace(s))
+	if len(head) > 512 {
+		head = head[:512]
+	}
+	return strings.HasPrefix(head, "<!doctype html") || strings.HasPrefix(head, "<html") || strings.Contains(head, "<head>")
+}
+
+func htmlTitle(s string) string {
+	lower := strings.ToLower(s)
+	start := strings.Index(lower, "<title>")
+	if start < 0 {
+		return ""
+	}
+	start += len("<title>")
+	end := strings.Index(lower[start:], "</title>")
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(cleanInline(s[start : start+end]))
+}
+
 func compactAPIError(b []byte) string {
 	var m map[string]any
 	if json.Unmarshal(b, &m) == nil {
@@ -900,6 +1449,17 @@ func compactAPIError(b []byte) string {
 		}
 	}
 	s := strings.TrimSpace(string(b))
+
+	// Some 403s never reach the app: an nginx-level block (firewall, WAF, rate
+	// limit) answers with an HTML page. Dumping that markup into the terminal
+	// is useless, so report the page's title instead.
+	if looksLikeHTML(s) {
+		if title := htmlTitle(s); title != "" {
+			return title
+		}
+		return "blocked before reaching RootBadger (HTML response)"
+	}
+
 	if len(s) > 500 {
 		s = s[:500] + "..."
 	}
@@ -1270,20 +1830,44 @@ func readSecret(label string) (string, error) {
 }
 
 func bodyFromFlagOrEditor(path, intro string) (string, error) {
-	return bodyFromFlagOrEditorWithInitial(path, intro, "")
+	return editorBody(path, intro, "", 0)
 }
 
 func bodyFromFlagOrEditorWithInitial(path, intro, initial string) (string, error) {
+	return editorBody(path, intro, initial, 0)
+}
+
+// composeBody is the entry point for posts, replies and messages: the same
+// editor flow, but hard-wrapped at wrapCols.
+func composeBody(path, intro string, wrapCols int) (string, error) {
+	return editorBody(path, intro, "", wrapCols)
+}
+
+func composeBodyWithInitial(path, intro, initial string, wrapCols int) (string, error) {
+	return editorBody(path, intro, initial, wrapCols)
+}
+
+func editorBody(path, intro, initial string, wrapCols int) (string, error) {
 	if path != "" {
 		b, err := os.ReadFile(path)
-		return string(b), err
+		if err != nil {
+			return "", err
+		}
+		return wrapBody(string(b), wrapCols), nil
 	}
 	tmp, err := os.CreateTemp("", "badgerclaw-*.md")
 	if err != nil {
 		return "", err
 	}
 	defer os.Remove(tmp.Name())
-	if _, err := tmp.WriteString("<!-- " + intro + "Lines inside this comment are ignored. -->\n\n"); err != nil {
+
+	header := "<!-- " + intro + "Lines inside this comment are ignored. -->\n"
+	if wrapCols > 0 {
+		// Vim and Neovim read this modeline and wrap while you type. Other
+		// editors ignore it; wrapBody still wraps their text on save.
+		header += fmt.Sprintf("<!-- vim: set textwidth=%d formatoptions+=t: -->\n", wrapCols)
+	}
+	if _, err := tmp.WriteString(header + "\n"); err != nil {
 		return "", err
 	}
 	if strings.TrimSpace(initial) != "" {
@@ -1292,14 +1876,16 @@ func bodyFromFlagOrEditorWithInitial(path, intro, initial string) (string, error
 		}
 	}
 	_ = tmp.Close()
+
 	editor := preferredEditor()
-	c := editorCommand(editor, tmp.Name())
+	c := editorCommand(editor, editorWrapArgs(editor, wrapCols), tmp.Name())
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	if err := c.Run(); err != nil {
 		return "", err
 	}
+
 	b, err := os.ReadFile(tmp.Name())
 	if err != nil {
 		return "", err
@@ -1308,7 +1894,186 @@ func bodyFromFlagOrEditorWithInitial(path, intro, initial string) (string, error
 	if strings.TrimSpace(body) == "" {
 		return "", errors.New("empty body")
 	}
-	return body, nil
+	return wrapBody(body, wrapCols), nil
+}
+
+// Composed text is hard-wrapped at this column unless the config or
+// BADGERCLAW_WRAP says otherwise. Zero or less turns wrapping off.
+const defaultWrapColumns = 80
+
+func resolveWrapColumns(cfg Config) int {
+	if env := strings.TrimSpace(os.Getenv("BADGERCLAW_WRAP")); env != "" {
+		if n, err := strconv.Atoi(env); err == nil {
+			return n
+		}
+	}
+	if cfg.WrapColumns != nil {
+		return *cfg.WrapColumns
+	}
+	return defaultWrapColumns
+}
+
+// wrapOverride lets --wrap N beat the configured width. -1 means "not given".
+func wrapOverride(api APIClient, flagValue int) int {
+	if flagValue >= 0 {
+		return flagValue
+	}
+	return api.wrapColumns()
+}
+
+func (api APIClient) wrapColumns() int {
+	return resolveWrapColumns(api.cfg)
+}
+
+var (
+	nanoWrapOnce sync.Once
+	nanoWrapOK   bool
+)
+
+// Old nano builds reject --breaklonglines, and an unknown flag would stop the
+// editor from opening at all, so ask nano what it supports before using it.
+func nanoSupportsHardWrap() bool {
+	nanoWrapOnce.Do(func() {
+		out, err := exec.Command("nano", "--help").CombinedOutput()
+		if err != nil {
+			return
+		}
+		help := string(out)
+		nanoWrapOK = strings.Contains(help, "--breaklonglines") && strings.Contains(help, "--fill")
+	})
+	return nanoWrapOK
+}
+
+// editorWrapArgs asks the editor to hard-wrap while the user types. Editors we
+// do not recognise get nothing here; their text is still wrapped on save by
+// wrapBody, so the posted result is the same either way.
+func editorWrapArgs(editor string, cols int) []string {
+	if cols <= 0 {
+		return nil
+	}
+	fields := strings.Fields(editor)
+	if len(fields) == 0 {
+		return nil
+	}
+
+	switch filepath.Base(fields[0]) {
+	case "vim", "nvim", "vi", "vimx", "gvim", "mvim":
+		return []string{"-c", fmt.Sprintf("setlocal textwidth=%d formatoptions+=t", cols)}
+	case "emacs", "emacsclient":
+		return []string{"--eval", fmt.Sprintf("(progn (setq-default fill-column %d) (add-hook 'find-file-hook 'turn-on-auto-fill))", cols)}
+	case "nano":
+		if nanoSupportsHardWrap() {
+			return []string{fmt.Sprintf("--fill=%d", cols), "--breaklonglines"}
+		}
+	}
+	return nil
+}
+
+func listMarker(s string) string {
+	trimmed := strings.TrimLeft(s, " \t")
+	if trimmed == "" {
+		return ""
+	}
+
+	// "- ", "* ", "+ "
+	if len(trimmed) > 1 && strings.ContainsRune("-*+", rune(trimmed[0])) && (trimmed[1] == ' ' || trimmed[1] == '\t') {
+		return trimmed[:2]
+	}
+
+	// "1. ", "2) "
+	i := 0
+	for i < len(trimmed) && trimmed[i] >= '0' && trimmed[i] <= '9' {
+		i++
+	}
+	if i > 0 && i+1 < len(trimmed) && (trimmed[i] == '.' || trimmed[i] == ')') && trimmed[i+1] == ' ' {
+		return trimmed[:i+2]
+	}
+	return ""
+}
+
+// wrapLine hard-wraps one line, keeping any quote prefix ("> ") on every
+// continuation line and indenting continuations of a list item under its text.
+// Words longer than the limit (URLs, mostly) are never broken.
+func wrapLine(line string, cols int) []string {
+	indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+	rest := line[len(indent):]
+
+	quote := ""
+	for strings.HasPrefix(rest, ">") {
+		quote += ">"
+		rest = rest[1:]
+		for strings.HasPrefix(rest, " ") {
+			quote += " "
+			rest = rest[1:]
+		}
+	}
+
+	prefix := indent + quote
+	continuation := prefix
+	if marker := listMarker(rest); marker != "" {
+		continuation = prefix + strings.Repeat(" ", len([]rune(marker)))
+	}
+
+	words := strings.Fields(rest)
+	if len(words) == 0 {
+		return []string{line}
+	}
+
+	var (
+		out        []string
+		current    = prefix
+		hasContent bool
+	)
+	for _, word := range words {
+		if !hasContent {
+			current += word
+			hasContent = true
+			continue
+		}
+		if len([]rune(current))+1+len([]rune(word)) <= cols {
+			current += " " + word
+			continue
+		}
+		out = append(out, current)
+		current = continuation + word
+	}
+	return append(out, current)
+}
+
+// wrapBody hard-wraps prose at cols. Code fences, indented code, tables and
+// headings are copied through untouched so wrapping cannot corrupt them.
+func wrapBody(text string, cols int) string {
+	if cols <= 0 || strings.TrimSpace(text) == "" {
+		return text
+	}
+
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	inFence := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			inFence = !inFence
+			out = append(out, line)
+			continue
+		}
+
+		switch {
+		case inFence,
+			trimmed == "",
+			strings.HasPrefix(line, "    "),
+			strings.HasPrefix(line, "\t"),
+			strings.HasPrefix(trimmed, "|"),
+			strings.HasPrefix(trimmed, "#"),
+			len([]rune(line)) <= cols:
+			out = append(out, line)
+		default:
+			out = append(out, wrapLine(line, cols)...)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 func fetchReplyQuote(api APIClient, postID string) (string, error) {
@@ -1347,11 +2112,16 @@ func preferredEditor() string {
 	return "nano"
 }
 
-func editorCommand(editor, path string) *exec.Cmd {
+func editorCommand(editor string, args []string, path string) *exec.Cmd {
 	if strings.ContainsAny(editor, " \t") {
-		return exec.Command("sh", "-c", editor+" "+shellQuote(path))
+		parts := []string{editor}
+		for _, arg := range args {
+			parts = append(parts, shellQuote(arg))
+		}
+		parts = append(parts, shellQuote(path))
+		return exec.Command("sh", "-c", strings.Join(parts, " "))
 	}
-	return exec.Command(editor, path)
+	return exec.Command(editor, append(append([]string{}, args...), path)...)
 }
 
 func shellQuote(s string) string {
@@ -1397,6 +2167,18 @@ func asMap(v any) map[string]any {
 		return m
 	}
 	return map[string]any{}
+}
+
+func asBool(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		return t == "1" || strings.EqualFold(t, "true") || strings.EqualFold(t, "yes")
+	case float64:
+		return t != 0
+	}
+	return false
 }
 
 func asSlice(v any) []any {
@@ -1866,7 +2648,7 @@ func (s *TUIState) handle(key string) error {
 		var body string
 		err := withNormalTerminal(func() error {
 			var bodyErr error
-			body, bodyErr = bodyFromFlagOrEditor("", "Write your reply. Save and close to review.\n")
+			body, bodyErr = composeBody("", "Write your reply. Save and close to review.\n", s.api.wrapColumns())
 			return bodyErr
 		})
 		if err != nil {
@@ -1884,6 +2666,8 @@ func (s *TUIState) handle(key string) error {
 			return err
 		}
 		s.status = stringify(out["message"])
+	case "P":
+		return s.profileEditFlow()
 	case "m":
 		var out map[string]any
 		if err := s.api.get("/api/v1/app/conversations", url.Values{"per_page": {"25"}}, &out); err != nil {
@@ -2100,6 +2884,14 @@ func (s *TUIState) refreshCurrent() error {
 	return s.loadSubscriptions()
 }
 
+func (s *TUIState) profileEditFlow() error {
+	if err := withNormalTerminal(func() error { return cmdProfileEdit(s.api) }); err != nil {
+		return err
+	}
+	s.status = "profile editor closed"
+	return nil
+}
+
 func (s *TUIState) searchFlow() error {
 	types := []string{"all", "users", "groups", "hashtags", "article", "message_id"}
 	labels := []string{"All", "User", "Group", "Hashtag", "Article num", "Message-ID"}
@@ -2182,7 +2974,7 @@ func (s *TUIState) postFlow() error {
 	var body string
 	err := withNormalTerminal(func() error {
 		var bodyErr error
-		body, bodyErr = bodyFromFlagOrEditor("", "Write your post. Save and close to review.\n")
+		body, bodyErr = composeBody("", "Write your post. Save and close to review.\n", s.api.wrapColumns())
 		return bodyErr
 	})
 	if err != nil {
@@ -2520,7 +3312,7 @@ func (s *TUIState) followupSelectedArticle() error {
 	var body string
 	err := withNormalTerminal(func() error {
 		var bodyErr error
-		body, bodyErr = bodyFromFlagOrEditorWithInitial("", "Write your followup. Save and close to review.\n", initial)
+		body, bodyErr = composeBodyWithInitial("", "Write your followup. Save and close to review.\n", initial, s.api.wrapColumns())
 		return bodyErr
 	})
 	if err != nil {
@@ -2910,6 +3702,7 @@ func showTUIHelp() {
 	fmt.Println("  p              create a post; inside a group it uses that group automatically")
 	fmt.Println("  r, reply       reply by post id")
 	fmt.Println("  c              mark selected/current group read")
+	fmt.Println("  P              edit your profile")
 	fmt.Println("  m, messages    private messages")
 	fmt.Println("  !, notices     notifications")
 	fmt.Println("  t              toggle full headers for all opened posts")

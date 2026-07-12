@@ -508,3 +508,64 @@ rm -rf dist
 ## License
 
 Copyright Yodabytz. All rights reserved unless a separate license file is added.
+
+## Editing Your Profile
+
+`badgerclaw profile-edit` opens an interactive editor for every field the API
+exposes: display name, bio, website, interests, posting headers (Organization,
+X-Info, signature, tagline, quote header), and preferences (private profile,
+newsletter, reply notifications, image attachments, email display). Nothing is
+written until you press `s` to save. Inside the TUI, press `P` for the same
+editor.
+
+For scripting, `profile-update` takes the same fields as flags:
+
+```sh
+badgerclaw profile-update --display-name "Ada" --website https://example.com
+badgerclaw profile-update --private=true
+badgerclaw profile-update --email-display custom --email-public me@example.com
+```
+
+The profile API replaces the whole profile on every write, so `profile-update`
+first reads your current profile and changes only the flags you pass. Fields you
+do not name are sent back unchanged.
+
+## Search Types
+
+RootBadger CLI uses the same search type names as the app API:
+
+- `all`
+- `posts`
+- `groups`
+- `users`
+- `hashtags`
+- `article`
+- `message_id`
+
+## Text Wrapping
+
+Posts, replies and private messages are hard-wrapped at 80 columns.
+
+While you type, RootBadger CLI asks your editor to wrap for you: vim and
+neovim get `textwidth`/`formatoptions` (also via a modeline in the file), emacs
+gets auto-fill, and nano gets `--fill`/`--breaklonglines` when it supports them.
+Editors it does not recognise still work: the text is wrapped when you save, so
+what gets posted is wrapped either way.
+
+Code fences, indented code, tables and headings are left alone, quoted lines
+keep their `>` prefix on every wrapped line, and long URLs are never broken.
+
+Change the width per command, or turn it off:
+
+```sh
+badgerclaw new rb.comp.lang.python --wrap 72
+badgerclaw reply 123 --wrap 0     # no wrapping
+```
+
+Or set a default in `~/.config/badgerclaw/config.json`:
+
+```json
+{ "wrap_columns": 72 }
+```
+
+`BADGERCLAW_WRAP=72` overrides both. Use `0` to disable wrapping entirely.
