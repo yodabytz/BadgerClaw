@@ -2612,6 +2612,24 @@ func (s *TUIState) draw() {
 				fit(cleanInline(stringify(item["name"])), nameW),
 				muted(fmt.Sprintf("posts:%v", item["post_count"])),
 			)
+		case "notifications":
+			marker := cyan("*")
+			if truthy(item["is_read"]) {
+				marker = " "
+			}
+			typeW := 14
+			title := cleanInline(stringify(item["title"]))
+			body := cleanInline(stringify(item["body"]))
+			line := title
+			if body != "" {
+				line += muted("  " + body)
+			}
+			fmt.Printf("%s%s %s  %s\n",
+				prefix,
+				marker,
+				muted(fit("["+stringify(item["type"])+"]", typeW)),
+				fit(line, max(20, width-typeW-6)),
+			)
 		case "search-users":
 			fmt.Printf("%s%3d  %s  %s\n",
 				prefix,
@@ -2708,7 +2726,14 @@ func (s *TUIState) handle(key string) error {
 	case "p", "n":
 		return s.postFlow()
 	case "c":
+		if s.screen == "notifications" {
+			return s.clearNotifications()
+		}
 		return s.markCurrentGroupRead()
+	case "d":
+		if s.screen == "notifications" {
+			return s.dismissSelectedNotification()
+		}
 	case "r":
 		id := s.promptInline("reply to post id: ")
 		clearScreen()
@@ -2749,18 +2774,7 @@ func (s *TUIState) handle(key string) error {
 		}
 		pause()
 	case "!":
-		var out map[string]any
-		if err := s.api.get("/api/v1/app/notifications", url.Values{"per_page": {"50"}}, &out); err != nil {
-			return err
-		}
-		clearScreen()
-		data := asMap(out["data"])
-		printTableHeader(fmt.Sprintf("Notifications  notices:%v messages:%v", data["unread_count"], data["unread_message_count"]), terminalWidth())
-		for _, item := range asSlice(data["items"]) {
-			n := asMap(item)
-			fmt.Printf("%s %s\n%s\n\n", muted("["+stringify(n["type"])+"]"), cleanInline(stringify(n["title"])), muted(wrap(cleanInline(stringify(n["body"])), terminalWidth()-4)))
-		}
-		pause()
+		return s.loadNotifications()
 	case "up", "k":
 		if s.selected > 0 {
 			s.selected--
@@ -3100,7 +3114,66 @@ func (s *TUIState) openSelected() error {
 	if s.screen == "groups" || s.screen == "subs" {
 		return s.openGroup(groupPath(item))
 	}
+	if s.screen == "notifications" {
+		postID := stringify(item["post_id"])
+		if postID == "" || postID == "<nil>" {
+			s.status = "this notification has no linked post"
+			return nil
+		}
+		// Opening the post also marks this notification read on the server.
+		_ = s.api.post("/api/v1/app/notifications/delete", map[string]any{"id": stringify(item["id"])}, nil)
+		return s.openArticle(postID)
+	}
 	return s.openArticle(fmt.Sprint(item["id"]))
+}
+
+func (s *TUIState) loadNotifications() error {
+	var out map[string]any
+	if err := s.api.get("/api/v1/app/notifications", url.Values{"per_page": {"50"}}, &out); err != nil {
+		return err
+	}
+	data := asMap(out["data"])
+	s.screen = "notifications"
+	s.current = ""
+	s.title = fmt.Sprintf("Notifications  notices:%v messages:%v", data["unread_count"], data["unread_message_count"])
+	s.items = mapsFromSlice(asSlice(data["items"]))
+	s.selected = 0
+	s.listScroll = 0
+	if len(s.items) == 0 {
+		s.status = "no notifications"
+	} else {
+		s.status = "Enter open  d dismiss  c clear all"
+	}
+	return nil
+}
+
+// clearNotifications marks every notification read on the server.
+func (s *TUIState) clearNotifications() error {
+	if err := s.api.post("/api/v1/app/notifications/clear", nil, nil); err != nil {
+		return err
+	}
+	s.status = "all notifications cleared"
+	return s.loadNotifications()
+}
+
+// dismissSelectedNotification marks the selected notification read and drops it.
+func (s *TUIState) dismissSelectedNotification() error {
+	if s.selected < 0 || s.selected >= len(s.items) {
+		return nil
+	}
+	id := stringify(s.items[s.selected]["id"])
+	if id == "" || id == "<nil>" {
+		return nil
+	}
+	if err := s.api.post("/api/v1/app/notifications/delete", map[string]any{"id": id}, nil); err != nil {
+		return err
+	}
+	s.items = append(s.items[:s.selected], s.items[s.selected+1:]...)
+	if s.selected >= len(s.items) {
+		s.selected = max(0, len(s.items)-1)
+	}
+	s.status = "notification dismissed"
+	return nil
 }
 
 func (s *TUIState) toggleSelectedGroup() error {
@@ -3819,7 +3892,7 @@ func showTUIHelp() {
 	fmt.Println("  c              mark selected/current group read")
 	fmt.Println("  P              edit your profile")
 	fmt.Println("  m, messages    private messages")
-	fmt.Println("  !, notices     notifications")
+	fmt.Println("  !, notices     notifications (Enter open, d dismiss, c clear all)")
 	fmt.Println("  t              toggle full headers for all opened posts")
 	fmt.Println("  q              quit")
 	fmt.Println()
