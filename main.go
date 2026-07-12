@@ -1895,6 +1895,7 @@ func readEditableLineInitial(label, initial string) (string, error) {
 	}
 	defer restoreTerminalState(fd, oldState)
 
+	fmt.Print("\x1b[?25h")
 	reader := bufio.NewReader(os.Stdin)
 	buffer := []rune(initial)
 	cursor := len(buffer)
@@ -2742,6 +2743,7 @@ func runTUI(api APIClient) error {
 		go func() {
 			for range winch {
 				mu.Lock()
+				tuiNeedsFullClear = true
 				state.draw()
 				mu.Unlock()
 			}
@@ -2757,6 +2759,7 @@ func runTUI(api APIClient) error {
 			if err != nil {
 				if errors.Is(err, io.EOF) {
 					clearScreen()
+					fmt.Print("\x1b[?25h\x1b[0m")
 					return nil
 				}
 				return err
@@ -2765,6 +2768,7 @@ func runTUI(api APIClient) error {
 				switch key {
 				case "open", "y", "Y":
 					clearScreen()
+					fmt.Print("\x1b[?25h\x1b[0m")
 					return nil
 				case "n", "N", "q":
 					state.confirmQuit = false
@@ -2833,40 +2837,70 @@ type ArticleNode struct {
 	Trace []bool
 }
 
+// tuiNeedsFullClear requests one real screen clear on the next frame: set on
+// entry, after an external program (editor, pager) has drawn, and on resize.
+// Steady-state frames never clear the screen; they overwrite it in place.
+var tuiNeedsFullClear = true
+
+// draw renders one full frame into a buffer and writes it with a single
+// syscall: cursor home (no clear), every line ends with clear-to-EOL, unused
+// rows are blanked, and the frame is wrapped in synchronized-output markers
+// with the cursor hidden. This is what stops the terminal from flickering.
 func (s *TUIState) draw() {
-	// Synchronized output: the terminal holds the frame until the end marker,
-	// so the clear-and-repaint cycle stops flickering. Terminals without
-	// support ignore both sequences.
-	fmt.Print("\033[?2026h")
-	defer fmt.Print("\033[?2026l")
 	width := terminalWidth()
 	height := terminalHeight()
-	clearScreen()
-	fmt.Print(tuiBg + tuiText)
-	defer fmt.Print("\033[0m")
+
+	var w strings.Builder
+	w.Grow(32 << 10)
+	location := s.renderBody(&w, width, height)
+
+	// Clear to end-of-line at every line break so leftovers from the previous
+	// frame never show through.
+	content := strings.ReplaceAll(w.String(), "\n", "\x1b[K\n")
+	used := strings.Count(content, "\n")
+
+	var f strings.Builder
+	f.Grow(len(content) + 1024)
+	f.WriteString("\x1b[?2026h\x1b[?25l\x1b[H")
+	if tuiNeedsFullClear {
+		f.WriteString("\x1b[2J")
+		tuiNeedsFullClear = false
+	}
+	f.WriteString(tuiBg + tuiText)
+	f.WriteString(content)
+	for row := used; row < height-1; row++ {
+		f.WriteString("\x1b[K\n")
+	}
+	f.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[0m\x1b[?2026l", height, statusBar(s.statusText(location), width)))
+	os.Stdout.WriteString(f.String())
+}
+
+// renderBody writes the frame's content lines (everything above the status
+// bar) and reports the location shown in it.
+func (s *TUIState) renderBody(w *strings.Builder, width, height int) string {
 	if s.screen == "article" {
-		s.drawArticle(width, height)
-		return
+		s.drawArticle(w, width, height)
+		return "article"
 	}
 	user := firstNonEmpty(s.api.cfg.User, "not logged in")
-	fmt.Printf("%s  %s  %s\n", amber(appName), muted(s.api.cfg.BaseURL), cyan(user))
+	fmt.Fprintf(w, "%s  %s  %s\n", amber(appName), muted(s.api.cfg.BaseURL), cyan(user))
 	usedRows := 1
 	location := "home"
 	if s.current != "" {
 		location = s.current
 	}
-	fmt.Println(muted(strings.Repeat("─", width)))
+	fmt.Fprintln(w, muted(strings.Repeat("─", width)))
 	usedRows++
 	if s.status != "" && !s.statusBarOnly() {
-		fmt.Println(cyan(s.status))
+		fmt.Fprintln(w, cyan(s.status))
 		usedRows++
 	}
 	if s.title != "" {
-		fmt.Println("\033[1m" + cleanInline(s.title) + "\033[22m")
+		fmt.Fprintln(w, "\033[1m"+cleanInline(s.title)+"\033[22m")
 		usedRows++
 	}
 	if len(s.items) == 0 {
-		fmt.Println(muted("No items to show. Press g to refresh new subscribed articles, G for the group tree, or s to search."))
+		fmt.Fprintln(w, muted("No items to show. Press g to refresh new subscribed articles, G for the group tree, or s to search."))
 		usedRows++
 	}
 	listHeight := max(1, height-usedRows-2)
@@ -2899,7 +2933,7 @@ func (s *TUIState) draw() {
 			if n := fmt.Sprint(item["unread_count"]); n != "" && n != "0" && n != "<nil>" {
 				unread = n
 			}
-			fmt.Printf("%s%s %s  %s%s  %s  %s\n",
+			fmt.Fprintf(w, "%s%s %s  %s%s  %s  %s\n",
 				prefix,
 				cyan(fit(unread, 4)),
 				expandMarker,
@@ -2916,7 +2950,7 @@ func (s *TUIState) draw() {
 				marker = cyan("*")
 			}
 			last := formatTimestamp(stringify(item["last_message_at"]))
-			fmt.Printf("%s%s %s  %s  %s\n",
+			fmt.Fprintf(w, "%s%s %s  %s  %s\n",
 				prefix,
 				marker,
 				cyan(fit(name, 28)),
@@ -2932,7 +2966,7 @@ func (s *TUIState) draw() {
 			if truthy(item["is_mine"]) {
 				nameCol = muted(fit("me", 18))
 			}
-			fmt.Printf("%s%s  %s  %s\n",
+			fmt.Fprintf(w, "%s%s  %s  %s\n",
 				prefix,
 				muted(fit(when, 16)),
 				nameCol,
@@ -2950,21 +2984,21 @@ func (s *TUIState) draw() {
 			if body != "" {
 				line += muted("  " + body)
 			}
-			fmt.Printf("%s%s %s  %s\n",
+			fmt.Fprintf(w, "%s%s %s  %s\n",
 				prefix,
 				marker,
 				muted(fit("["+stringify(item["type"])+"]", typeW)),
 				fit(line, max(20, width-typeW-6)),
 			)
 		case "search-users":
-			fmt.Printf("%s%3d  %s  %s\n",
+			fmt.Fprintf(w, "%s%3d  %s  %s\n",
 				prefix,
 				i+1,
 				cyan(fit(cleanInline(firstNonEmpty(stringify(item["display_name"]), stringify(item["username"]))), 32)),
 				muted(fit("@"+cleanInline(stringify(item["username"])), max(16, width-42))),
 			)
 		case "search-tags":
-			fmt.Printf("%s%3d  %s  %s\n",
+			fmt.Fprintf(w, "%s%3d  %s  %s\n",
 				prefix,
 				i+1,
 				cyan(fit("#"+strings.TrimPrefix(cleanInline(stringify(item["name"])), "#"), 36)),
@@ -3005,7 +3039,7 @@ func (s *TUIState) draw() {
 			meta += fmt.Sprintf(" u:%v", item["useful_count"])
 			metaW := clamp(width/4, 12, 34)
 			subjectW := max(18, width-18-len([]rune(connector))-metaW)
-			fmt.Printf("%s%s%s %s  %s%s %s %s\n",
+			fmt.Fprintf(w, "%s%s%s %s  %s%s %s %s\n",
 				prefix,
 				unread,
 				fit(replyCount, 3),
@@ -3017,8 +3051,8 @@ func (s *TUIState) draw() {
 			)
 		}
 	}
-	fmt.Println(muted(strings.Repeat("─", width)))
-	fmt.Printf("\033[%d;1H%s", height, statusBar(s.statusText(location), width))
+	fmt.Fprintln(w, muted(strings.Repeat("─", width)))
+	return location
 }
 
 func (s *TUIState) handle(key string) error {
@@ -4014,14 +4048,14 @@ func (s *TUIState) followupSelectedArticle() error {
 	return s.loadArticle(s.articleRootID)
 }
 
-func (s *TUIState) drawArticle(width, height int) {
+func (s *TUIState) drawArticle(w *strings.Builder, width, height int) {
 	selected := map[string]any{}
 	if s.articleSelected >= 0 && s.articleSelected < len(s.articleNodes) {
 		selected = s.articleNodes[s.articleSelected].Post
 	}
 	title := cleanInline(firstNonEmpty(stringify(s.articleRoot["subject"]), stringify(selected["subject"]), "Article"))
-	fmt.Printf("%s  %s\n", amber(appName), cyan(fit(title, max(20, width-len(appName)-4))))
-	fmt.Println(muted(strings.Repeat("─", width)))
+	fmt.Fprintf(w, "%s  %s\n", amber(appName), cyan(fit(title, max(20, width-len(appName)-4))))
+	fmt.Fprintln(w, muted(strings.Repeat("─", width)))
 
 	topHeight := clamp(height/3, 7, 14)
 	threadLines := s.threadPaneLines(width)
@@ -4032,13 +4066,13 @@ func (s *TUIState) drawArticle(width, height int) {
 	for i := 0; i < topHeight; i++ {
 		idx := start + i
 		if idx < len(threadLines) {
-			fmt.Println(threadLines[idx])
+			fmt.Fprintln(w, threadLines[idx])
 		} else {
-			fmt.Println()
+			fmt.Fprintln(w)
 		}
 	}
 
-	fmt.Println(muted(strings.Repeat("─", width)))
+	fmt.Fprintln(w, muted(strings.Repeat("─", width)))
 	bodyHeight := max(6, height-topHeight-6)
 	s.articlePageSize = max(3, bodyHeight-2)
 	bodyLines := s.articleBodyLines(selected, width)
@@ -4049,12 +4083,11 @@ func (s *TUIState) drawArticle(width, height int) {
 	for i := 0; i < bodyHeight; i++ {
 		idx := s.articleBodyScroll + i
 		if idx < len(bodyLines) {
-			fmt.Println(bodyLines[idx])
+			fmt.Fprintln(w, bodyLines[idx])
 		} else {
-			fmt.Println()
+			fmt.Fprintln(w)
 		}
 	}
-	fmt.Printf("\033[%d;1H%s", height, statusBar(s.statusText("article"), width))
 }
 
 func (s *TUIState) threadPaneLines(width int) []string {
@@ -4508,7 +4541,11 @@ func withNormalTerminal(fn func() error) error {
 	}
 	fd := int(os.Stdin.Fd())
 	restoreTerminalState(fd, terminalRestoreState)
+	fmt.Print("\x1b[?25h")
 	defer func() {
+		// Whatever ran (editor, pager, prompt) drew over the frame; the next
+		// draw must start from a clean screen.
+		tuiNeedsFullClear = true
 		_ = rawTerminal(fd)
 	}()
 	return fn()
