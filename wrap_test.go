@@ -200,3 +200,22 @@ func TestColorEmission(t *testing.T) {
 		t.Fatalf("256 fallback fg: %q", got)
 	}
 }
+
+func TestParseCustomHeaders(t *testing.T) {
+	got, err := parseCustomHeaders("X-Editor: vim\nX-Clacks-Overhead: GNU Terry Pratchett")
+	if err != nil || len(got) != 2 || got[0]["name"] != "X-Editor" || got[1]["value"] != "GNU Terry Pratchett" {
+		t.Fatalf("parse failed: %v %v", got, err)
+	}
+	if _, err := parseCustomHeaders("Bad Name!: x"); err == nil {
+		t.Fatal("invalid name accepted")
+	}
+	if _, err := parseCustomHeaders("NoColonHere"); err == nil {
+		t.Fatal("missing colon accepted")
+	}
+	if _, err := parseCustomHeaders("A: 1\nB: 2\nC: 3\nD: 4\nE: 5\nF: 6"); err == nil {
+		t.Fatal("six headers accepted")
+	}
+	if got, err := parseCustomHeaders(""); err != nil || len(got) != 0 {
+		t.Fatal("empty should parse to none")
+	}
+}

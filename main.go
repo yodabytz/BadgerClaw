@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -366,6 +367,7 @@ Usage:
                             [--notify-replies] [--newsletter] [--private]
                             [--image-attachments click|never]
                             [--email-display hidden|masked|real|custom] [--email-public ADDR]
+                            [--custom-headers "Name: Value; Name2: Value2"]
   badgerclaw admin
   badgerclaw admin-section users|statistics|proposals|reports|images|private_groups|bans|logs|newsletters|webhooks
   badgerclaw admin-detail SECTION ID
@@ -828,6 +830,7 @@ type profileForm struct {
 	imagePref     string
 	emailDisplay  string
 	emailPublic   string
+	custom        string // one "Name: Value" per line, max 5
 }
 
 func fetchProfileForm(api APIClient) (profileForm, error) {
@@ -848,6 +851,16 @@ func fetchProfileForm(api APIClient) (profileForm, error) {
 		}
 	}
 
+	customLines := []string{}
+	for _, item := range asSlice(headers["custom"]) {
+		h := asMap(item)
+		name := cleanInline(stringify(h["name"]))
+		value := cleanInline(stringify(h["value"]))
+		if name != "" && value != "" {
+			customLines = append(customLines, name+": "+value)
+		}
+	}
+
 	form := profileForm{
 		displayName:   stringify(user["display_name"]),
 		bio:           stringify(user["bio"]),
@@ -865,6 +878,7 @@ func fetchProfileForm(api APIClient) (profileForm, error) {
 		imagePref:     stringify(prefs["image_attachment_preference"]),
 		emailDisplay:  stringify(prefs["email_display"]),
 		emailPublic:   stringify(prefs["email_public"]),
+		custom:        strings.Join(customLines, "\n"),
 	}
 
 	if form.imagePref != "never" {
@@ -908,7 +922,53 @@ func (f profileForm) payload() map[string]any {
 	if f.emailDisplay == "custom" {
 		body["email_public"] = orNull(f.emailPublic)
 	}
+
+	custom, _ := parseCustomHeaders(f.custom)
+	if len(custom) == 0 {
+		body["custom_headers"] = nil
+	} else {
+		body["custom_headers"] = custom
+	}
 	return body
+}
+
+// parseCustomHeaders turns "Name: Value" lines into the API's header list,
+// enforcing the five-header limit and the header-name shape locally so the
+// user gets a clear message instead of a 422.
+func parseCustomHeaders(text string) ([]map[string]string, error) {
+	out := []map[string]string{}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		name, value, found := strings.Cut(line, ":")
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if !found || name == "" || value == "" {
+			return nil, fmt.Errorf("bad header line %q; use Name: Value", line)
+		}
+		if !validHeaderName(name) {
+			return nil, fmt.Errorf("bad header name %q; letters, digits and dashes only", name)
+		}
+		out = append(out, map[string]string{"name": name, "value": value})
+		if len(out) > 5 {
+			return nil, errors.New("at most 5 custom headers")
+		}
+	}
+	return out, nil
+}
+
+func validHeaderName(name string) bool {
+	if name == "" || (name[0] < 'A' || name[0] > 'Z') && (name[0] < 'a' || name[0] > 'z') {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func saveProfileForm(api APIClient, form profileForm) (map[string]any, error) {
@@ -954,6 +1014,7 @@ func cmdProfileUpdate(api APIClient, args []string) error {
 	imagePref := fs.String("image-attachments", "click", "image attachments: click or never")
 	emailDisplay := fs.String("email-display", "hidden", "email display: hidden, masked, real, or custom")
 	emailPublic := fs.String("email-public", "", "custom public email; used with --email-display custom")
+	customHeaders := fs.String("custom-headers", "", "up to 5 as \"Name: Value; Name2: Value2\"; empty string clears")
 	_ = fs.Parse(args)
 
 	changed := map[string]bool{}
@@ -1036,6 +1097,13 @@ func cmdProfileUpdate(api APIClient, args []string) error {
 	}
 	if changed["email-public"] {
 		form.emailPublic = *emailPublic
+	}
+	if changed["custom-headers"] {
+		text := strings.ReplaceAll(*customHeaders, ";", "\n")
+		if _, err := parseCustomHeaders(text); err != nil {
+			return err
+		}
+		form.custom = strings.TrimSpace(text)
 	}
 
 	out, err := saveProfileForm(api, form)
@@ -1208,6 +1276,37 @@ func profileFields() []profileField {
 				} else {
 					f.imagePref = "never"
 				}
+				return nil
+			},
+		},
+		{
+			label: "Custom headers",
+			display: func(f profileForm) string {
+				n := 0
+				for _, line := range strings.Split(f.custom, "\n") {
+					if strings.TrimSpace(line) != "" {
+						n++
+					}
+				}
+				if n == 0 {
+					return muted("(none, up to 5)")
+				}
+				return fmt.Sprintf("%d set  %s", n, muted(firstLine(f.custom)))
+			},
+			edit: func(f *profileForm) error {
+				body, err := bodyFromFlagOrEditorWithInitial("", "Custom post headers, one per line as Name: Value, up to 5. Names use letters, digits and dashes. ", f.custom)
+				if err != nil {
+					if strings.Contains(err.Error(), "empty body") {
+						f.custom = ""
+						return nil
+					}
+					return err
+				}
+				text := strings.TrimSpace(body)
+				if _, err := parseCustomHeaders(text); err != nil {
+					return err
+				}
+				f.custom = text
 				return nil
 			},
 		},
@@ -4173,11 +4272,31 @@ func postHeaderLines(post map[string]any, expanded bool) []string {
 		{"X-System", firstNonEmpty(headerValue(headers, "X-System"), "RootBadger/1.0 (privacy-protected)")},
 	}
 
+	known := map[string]bool{
+		"from": true, "date": true, "newsgroups": true, "subject": true,
+		"organization": true, "message-id": true, "x-info": true,
+		"user-agent": true, "lines": true, "x-system": true,
+		"references": true, "followup-to": true,
+	}
 	for _, item := range ordered {
 		if strings.TrimSpace(item.value) == "" {
 			continue
 		}
 		lines = append(lines, item.label+": "+item.value)
+	}
+	// The author's custom profile headers arrive as extra keys; print them in
+	// a stable order after the built-ins.
+	extras := make([]string, 0, len(headers))
+	for k := range headers {
+		if !known[strings.ToLower(k)] {
+			extras = append(extras, k)
+		}
+	}
+	sort.Strings(extras)
+	for _, k := range extras {
+		if v := cleanInline(stringify(headers[k])); v != "" {
+			lines = append(lines, k+": "+v)
+		}
 	}
 	return lines
 }

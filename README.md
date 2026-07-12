@@ -591,3 +591,18 @@ the exact palette is used, otherwise every color is quantized to the nearest
 xterm-256 entry, so all themes work on any 256-color terminal. Set
 `BADGERCLAW_COLOR=truecolor` or `BADGERCLAW_COLOR=256` to override the
 detection.
+
+## Custom Headers
+
+Up to five personal post headers (X-Editor, X-Clacks-Overhead, ...), shown
+with the built-in headers on your posts everywhere.
+
+```sh
+badgerclaw profile-update --custom-headers "X-Editor: vim; X-Distro: Gentoo"
+badgerclaw profile-update --custom-headers ""   # clear
+```
+
+In the TUI profile editor (`P`), the Custom headers field opens your editor
+with one `Name: Value` per line. Names use letters, digits and dashes;
+built-in header names are reserved.
+
