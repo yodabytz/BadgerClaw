@@ -1060,7 +1060,7 @@ func profileFields() []profileField {
 			label:   "Display name",
 			display: func(f profileForm) string { return orPlaceholder(f.displayName, "(none)") },
 			edit: func(f *profileForm) error {
-				value, err := profilePrompt("display name: ")
+				value, err := profilePromptInitial("display name: ", f.displayName)
 				if err != nil {
 					return err
 				}
@@ -1084,7 +1084,7 @@ func profileFields() []profileField {
 			label:   "Website",
 			display: func(f profileForm) string { return orPlaceholder(f.website, "(none)") },
 			edit: func(f *profileForm) error {
-				value, err := profilePrompt("website URL: ")
+				value, err := profilePromptInitial("website URL: ", f.website)
 				if err != nil {
 					return err
 				}
@@ -1096,7 +1096,7 @@ func profileFields() []profileField {
 			label:   "Interests",
 			display: func(f profileForm) string { return orPlaceholder(f.interests, "(none)") },
 			edit: func(f *profileForm) error {
-				value, err := profilePrompt("interests, comma separated: ")
+				value, err := profilePromptInitial("interests, comma separated: ", f.interests)
 				if err != nil {
 					return err
 				}
@@ -1108,7 +1108,7 @@ func profileFields() []profileField {
 			label:   "Organization",
 			display: func(f profileForm) string { return orPlaceholder(f.organization, "(none)") },
 			edit: func(f *profileForm) error {
-				value, err := profilePrompt("organization: ")
+				value, err := profilePromptInitial("organization: ", f.organization)
 				if err != nil {
 					return err
 				}
@@ -1120,7 +1120,7 @@ func profileFields() []profileField {
 			label:   "X-Info",
 			display: func(f profileForm) string { return orPlaceholder(f.xInfo, "(none)") },
 			edit: func(f *profileForm) error {
-				value, err := profilePrompt("x-info: ")
+				value, err := profilePromptInitial("x-info: ", f.xInfo)
 				if err != nil {
 					return err
 				}
@@ -1132,7 +1132,7 @@ func profileFields() []profileField {
 			label:   "Tagline",
 			display: func(f profileForm) string { return orPlaceholder(f.tagline, "(none)") },
 			edit: func(f *profileForm) error {
-				value, err := profilePrompt("tagline: ")
+				value, err := profilePromptInitial("tagline: ", f.tagline)
 				if err != nil {
 					return err
 				}
@@ -1156,9 +1156,12 @@ func profileFields() []profileField {
 			label:   "Quote header",
 			display: func(f profileForm) string { return orPlaceholder(f.quoteHeader, "(default)") },
 			edit: func(f *profileForm) error {
-				value, err := profilePrompt("quote header, needs {date} and {author}, empty for default: ")
+				value, err := profilePromptInitial("quote header, needs {date} and {author}, empty for default: ", f.quoteHeader)
 				if err != nil {
 					return err
+				}
+				if value != "" && (!strings.Contains(value, "{date}") || !strings.Contains(value, "{author}")) {
+					return errors.New("quote header must contain {date} and {author}, or be empty for the default")
 				}
 				f.quoteHeader = value
 				return nil
@@ -1246,7 +1249,7 @@ func profileFields() []profileField {
 				}
 				f.emailDisplay = order[next]
 				if f.emailDisplay == "custom" {
-					value, err := profilePrompt("public email address: ")
+					value, err := profilePromptInitial("public email address: ", f.emailPublic)
 					if err != nil {
 						return err
 					}
@@ -1306,11 +1309,17 @@ func renderProfileEditor(form profileForm, fields []profileField, dirty bool) {
 // stdin closed (Ctrl-D); callers must stop rather than re-prompt, or the editor
 // spins forever on EOF.
 func profilePrompt(label string) (string, error) {
+	return profilePromptInitial(label, "")
+}
+
+// profilePromptInitial pre-fills the line with the field's current value, so
+// editing does not silently wipe it.
+func profilePromptInitial(label, initial string) (string, error) {
 	width := terminalWidth()
 	height := terminalHeight()
 	fmt.Printf("\033[%d;1H%s%s", height, tuiBg+tuiText, strings.Repeat(" ", width))
 	fmt.Printf("\033[%d;1H", height)
-	line, err := readEditableLine(label)
+	line, err := readEditableLineInitial(label, initial)
 	if err != nil {
 		return "", err
 	}
@@ -1867,6 +1876,12 @@ func promptLine(label string) string {
 }
 
 func readEditableLine(label string) (string, error) {
+	return readEditableLineInitial(label, "")
+}
+
+// readEditableLineInitial is readEditableLine with the buffer pre-filled, so
+// editing an existing value starts from that value instead of an empty line.
+func readEditableLineInitial(label, initial string) (string, error) {
 	fd := int(os.Stdin.Fd())
 	oldState, err := unix.IoctlGetTermios(fd, unix.TCGETS)
 	if err != nil {
@@ -1881,8 +1896,8 @@ func readEditableLine(label string) (string, error) {
 	defer restoreTerminalState(fd, oldState)
 
 	reader := bufio.NewReader(os.Stdin)
-	buffer := []rune{}
-	cursor := 0
+	buffer := []rune(initial)
+	cursor := len(buffer)
 	redraw := func() {
 		fmt.Print("\r\033[2K")
 		fmt.Print(label + string(buffer))
@@ -1891,7 +1906,7 @@ func readEditableLine(label string) (string, error) {
 		}
 	}
 
-	fmt.Print(label)
+	redraw()
 	for {
 		r, _, err := reader.ReadRune()
 		if err != nil {
@@ -4051,14 +4066,19 @@ func (s *TUIState) threadPaneLines(width int) []string {
 		if i == s.articleSelected {
 			prefix = cyan("> ")
 		}
+		unread := " "
+		if truthy(post["is_unread"]) {
+			unread = cyan("*")
+		}
 		author := asMap(post["author"])
 		name := firstNonEmpty(cleanInline(stringify(author["display_name"])), cleanInline(stringify(author["username"])), "unknown")
 		subject := cleanInline(stringify(post["subject"]))
 		byline := "by " + name
 		bylineW := clamp(width/4, 14, 30)
 		subjectW := max(10, width-len([]rune(connector))-bylineW-18)
-		line := fmt.Sprintf("%s%s%s %s  %s",
+		line := fmt.Sprintf("%s%s%s%s %s  %s",
 			prefix,
+			unread,
 			muted(connector),
 			cyan(fit(fmt.Sprintf("[%v]", post["id"]), 8)),
 			amber(fit(subject, subjectW)),
