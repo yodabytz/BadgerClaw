@@ -117,3 +117,18 @@ func TestRequestLabelIsFriendly(t *testing.T) {
 		t.Error("unknown GET should fall back to Loading")
 	}
 }
+
+func TestFormatTimestamp(t *testing.T) {
+	if got := formatTimestamp("2020-01-02T15:04:05Z"); got != "2020-01-02 15:04" && !strings.HasSuffix(got, ":04") {
+		// Local timezone shifts the clock; the date form is what matters.
+		if len(got) != len("2006-01-02 15:04") {
+			t.Fatalf("old timestamp should render absolute, got %q", got)
+		}
+	}
+	if got := formatTimestamp(""); got != "" {
+		t.Fatalf("empty in, empty out; got %q", got)
+	}
+	if got := formatTimestamp("not-a-date"); got != "not-a-date" {
+		t.Fatalf("unparseable input should pass through, got %q", got)
+	}
+}

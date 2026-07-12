@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -2216,6 +2217,32 @@ func stringSlice(items []any) []string {
 	return out
 }
 
+// formatTimestamp renders an ISO-8601 timestamp as a short local time, with a
+// relative form for recent moments. Unparseable input is returned as-is.
+func formatTimestamp(iso string) string {
+	iso = strings.TrimSpace(iso)
+	if iso == "" || iso == "<nil>" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, iso)
+	if err != nil {
+		return iso
+	}
+	t = t.Local()
+	age := time.Since(t)
+	switch {
+	case age < time.Minute:
+		return "just now"
+	case age < time.Hour:
+		return fmt.Sprintf("%dm ago", int(age.Minutes()))
+	case age < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(age.Hours()))
+	case age < 7*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(age.Hours()/24))
+	}
+	return t.Format("2006-01-02 15:04")
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if strings.TrimSpace(v) != "" {
@@ -2426,6 +2453,8 @@ func requestLabel(method, path string) string {
 		return "Posting\u2026"
 	case strings.Contains(path, "/replies") && method == "POST":
 		return "Sending reply\u2026"
+	case strings.Contains(path, "/conversations"):
+		return "Fetching messages\u2026"
 	case strings.Contains(path, "/messages"):
 		if method == "POST" {
 			return "Sending message\u2026"
@@ -2464,9 +2493,28 @@ func runTUI(api APIClient) error {
 		state.status = err.Error()
 	}
 	return withCbreakTerminal(func() error {
+		// Redraw on terminal resize. The mutex is held everywhere except while
+		// blocked waiting for a key, which is the only time the resize
+		// goroutine may paint: state is quiescent there.
+		var mu sync.Mutex
+		winch := make(chan os.Signal, 1)
+		signal.Notify(winch, syscall.SIGWINCH)
+		defer signal.Stop(winch)
+		go func() {
+			for range winch {
+				mu.Lock()
+				state.draw()
+				mu.Unlock()
+			}
+		}()
+
+		mu.Lock()
+		defer mu.Unlock()
 		for {
 			state.draw()
+			mu.Unlock()
 			key, err := readKey()
+			mu.Lock()
 			if err != nil {
 				if errors.Is(err, io.EOF) {
 					clearScreen()
@@ -2509,17 +2557,20 @@ func runTUI(api APIClient) error {
 }
 
 type TUIState struct {
-	api         APIClient
-	screen      string
-	status      string
-	items       []map[string]any
-	title       string
-	current     string
-	selected    int
-	listScroll  int
-	showHeaders bool
-	showAllSubs bool
-	confirmQuit bool
+	api              APIClient
+	screen           string
+	status           string
+	items            []map[string]any
+	title            string
+	current          string
+	selected         int
+	listScroll       int
+	lastListHeight   int
+	conversationID   string
+	conversationUser string
+	showHeaders      bool
+	showAllSubs      bool
+	confirmQuit      bool
 
 	previousScreen     string
 	previousTitle      string
@@ -2544,6 +2595,11 @@ type ArticleNode struct {
 }
 
 func (s *TUIState) draw() {
+	// Synchronized output: the terminal holds the frame until the end marker,
+	// so the clear-and-repaint cycle stops flickering. Terminals without
+	// support ignore both sequences.
+	fmt.Print("\033[?2026h")
+	defer fmt.Print("\033[?2026l")
 	width := terminalWidth()
 	height := terminalHeight()
 	clearScreen()
@@ -2575,6 +2631,7 @@ func (s *TUIState) draw() {
 		usedRows++
 	}
 	listHeight := max(1, height-usedRows-2)
+	s.lastListHeight = listHeight
 	s.ensureListSelectionVisible(listHeight)
 	end := min(len(s.items), s.listScroll+listHeight)
 	for i := s.listScroll; i < end; i++ {
@@ -2611,6 +2668,36 @@ func (s *TUIState) draw() {
 				cyan(fit(cleanInline(groupPath(item)), pathW)),
 				fit(cleanInline(stringify(item["name"])), nameW),
 				muted(fmt.Sprintf("posts:%v", item["post_count"])),
+			)
+		case "messages":
+			other := asMap(item["other_user"])
+			name := firstNonEmpty(cleanInline(stringify(other["display_name"])), cleanInline(stringify(other["username"])), "unknown")
+			marker := " "
+			if unreadCount(item) > 0 {
+				marker = cyan("*")
+			}
+			last := formatTimestamp(stringify(item["last_message_at"]))
+			fmt.Printf("%s%s %s  %s  %s\n",
+				prefix,
+				marker,
+				cyan(fit(name, 28)),
+				muted(fit(fmt.Sprintf("unread:%v", item["unread_count"]), 12)),
+				muted(fit(last, max(12, width-50))),
+			)
+		case "message-thread":
+			sender := asMap(item["sender"])
+			name := firstNonEmpty(cleanInline(stringify(sender["display_name"])), cleanInline(stringify(sender["username"])), "unknown")
+			when := formatTimestamp(stringify(item["created_at"]))
+			body := cleanInline(stringify(item["body"]))
+			nameCol := cyan(fit(name, 18))
+			if truthy(item["is_mine"]) {
+				nameCol = muted(fit("me", 18))
+			}
+			fmt.Printf("%s%s  %s  %s\n",
+				prefix,
+				muted(fit(when, 16)),
+				nameCol,
+				fit(body, max(20, width-42)),
 			)
 		case "notifications":
 			marker := cyan("*")
@@ -2735,6 +2822,9 @@ func (s *TUIState) handle(key string) error {
 			return s.dismissSelectedNotification()
 		}
 	case "r":
+		if s.screen == "messages" || s.screen == "message-thread" {
+			return s.replyToConversation()
+		}
 		id := s.promptInline("reply to post id: ")
 		clearScreen()
 		var body string
@@ -2761,18 +2851,7 @@ func (s *TUIState) handle(key string) error {
 	case "P":
 		return s.profileEditFlow()
 	case "m":
-		var out map[string]any
-		if err := s.api.get("/api/v1/app/conversations", url.Values{"per_page": {"25"}}, &out); err != nil {
-			return err
-		}
-		clearScreen()
-		printTableHeader("Messages", terminalWidth())
-		for _, item := range asSlice(out["data"]) {
-			c := asMap(item)
-			u := asMap(c["other_user"])
-			fmt.Printf("%s  %s  %s\n", muted(fmt.Sprintf("[%v]", c["id"])), fit(cleanInline(stringify(u["display_name"])), 28), muted(fmt.Sprintf("unread:%v last:%s", c["unread_count"], stringify(c["last_message_at"]))))
-		}
-		pause()
+		return s.loadConversations()
 	case "!":
 		return s.loadNotifications()
 	case "up", "k":
@@ -2783,6 +2862,14 @@ func (s *TUIState) handle(key string) error {
 		if s.selected < len(s.items)-1 {
 			s.selected++
 		}
+	case "pgup":
+		s.selected = max(0, s.selected-max(1, s.lastListHeight))
+	case "pgdn":
+		s.selected = min(max(0, len(s.items)-1), s.selected+max(1, s.lastListHeight))
+	case "home-key":
+		s.selected = 0
+	case "end-key":
+		s.selected = max(0, len(s.items)-1)
 	case "enter", "open":
 		if s.screen == "groups" {
 			return s.toggleSelectedGroup()
@@ -2817,6 +2904,9 @@ func (s *TUIState) goBack() error {
 	if s.screen == "article" {
 		return s.closeArticle()
 	}
+	if s.screen == "message-thread" {
+		return s.loadConversations()
+	}
 	if s.screen != "subs" {
 		return s.loadSubscriptions()
 	}
@@ -2832,6 +2922,12 @@ func (s *TUIState) statusText(location string) string {
 		return s.status
 	}
 	switch s.screen {
+	case "messages":
+		return "\u2191/\u2193 select  Enter open  r reply  \u2190 back  q quit"
+	case "message-thread":
+		return "\u2191/\u2193 select  Enter full message  r reply  \u2190 back"
+	case "notifications":
+		return "\u2191/\u2193 select  Enter open post  d dismiss  c clear all  \u2190 back"
 	case "subs":
 		if s.showAllSubs {
 			return "↑/↓ select  Enter open group  + subscribe  - unsubscribe  P post  C mark read  g new groups  G group tree  L unread only  S search  Q quit"
@@ -3114,6 +3210,13 @@ func (s *TUIState) openSelected() error {
 	if s.screen == "groups" || s.screen == "subs" {
 		return s.openGroup(groupPath(item))
 	}
+	if s.screen == "messages" {
+		return s.openConversation(item)
+	}
+	if s.screen == "message-thread" {
+		s.showMessagePager(item)
+		return nil
+	}
 	if s.screen == "notifications" {
 		postID := stringify(item["post_id"])
 		if postID == "" || postID == "<nil>" {
@@ -3125,6 +3228,107 @@ func (s *TUIState) openSelected() error {
 		return s.openArticle(postID)
 	}
 	return s.openArticle(fmt.Sprint(item["id"]))
+}
+
+func (s *TUIState) loadConversations() error {
+	var out map[string]any
+	if err := s.api.get("/api/v1/app/conversations", url.Values{"per_page": {"50"}}, &out); err != nil {
+		return err
+	}
+	s.screen = "messages"
+	s.current = ""
+	s.conversationID = ""
+	s.conversationUser = ""
+	s.title = "Messages"
+	s.items = mapsFromSlice(asSlice(out["data"]))
+	s.selected = 0
+	s.listScroll = 0
+	if len(s.items) == 0 {
+		s.status = "no conversations; use `badgerclaw send USER` to start one"
+	} else {
+		s.status = "Enter open conversation  r reply"
+	}
+	return nil
+}
+
+func (s *TUIState) openConversation(item map[string]any) error {
+	id := stringify(item["id"])
+	if id == "" || id == "<nil>" {
+		return errors.New("no conversation selected")
+	}
+	var out map[string]any
+	if err := s.api.get("/api/v1/app/conversations/"+url.PathEscape(id), nil, &out); err != nil {
+		return err
+	}
+	data := asMap(out["data"])
+	other := asMap(data["other_user"])
+	name := firstNonEmpty(cleanInline(stringify(other["display_name"])), cleanInline(stringify(other["username"])), "conversation")
+	s.screen = "message-thread"
+	s.conversationID = id
+	s.conversationUser = cleanInline(stringify(other["username"]))
+	s.title = "Messages with " + name
+	s.items = mapsFromSlice(asSlice(data["messages"]))
+	s.selected = max(0, len(s.items)-1)
+	s.listScroll = 0
+	s.status = "Enter read full message  r reply  \u2190 back"
+	return nil
+}
+
+// showMessagePager prints one full message and waits, for bodies that do not
+// fit on a list row.
+func (s *TUIState) showMessagePager(item map[string]any) {
+	_ = withNormalTerminal(func() error {
+		clearScreen()
+		fmt.Print(tuiBg + tuiText)
+		defer fmt.Print("\033[0m")
+		width := terminalWidth()
+		sender := asMap(item["sender"])
+		name := firstNonEmpty(cleanInline(stringify(sender["display_name"])), cleanInline(stringify(sender["username"])), "unknown")
+		printTableHeader("Message from "+name+"  "+formatTimestamp(stringify(item["created_at"])), width)
+		fmt.Println()
+		for _, line := range displayBlockLines(stringify(item["body"]), max(40, width-2)) {
+			fmt.Println(line)
+		}
+		pause()
+		return nil
+	})
+}
+
+// replyToConversation composes a message to the other participant.
+func (s *TUIState) replyToConversation() error {
+	user := s.conversationUser
+	if user == "" && s.screen == "messages" && s.selected >= 0 && s.selected < len(s.items) {
+		user = cleanInline(stringify(asMap(s.items[s.selected]["other_user"])["username"]))
+	}
+	if user == "" {
+		return errors.New("no conversation selected")
+	}
+	clearScreen()
+	var body string
+	err := withNormalTerminal(func() error {
+		var bodyErr error
+		body, bodyErr = composeBody("", "Write your message to "+user+". Save and close to send.\n", s.api.wrapColumns())
+		return bodyErr
+	})
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(body) == "" {
+		return errors.New("message body was empty")
+	}
+	if !confirmDefaultYes("Send to " + user + "? Y/n: ") {
+		s.status = "message cancelled"
+		return nil
+	}
+	var out map[string]any
+	if err := s.api.post("/api/v1/app/messages/"+url.PathEscape(user), map[string]any{"body": body}, &out); err != nil {
+		return err
+	}
+	s.status = firstNonEmpty(cleanInline(stringify(out["message"])), "message sent")
+	if s.conversationID != "" {
+		return s.openConversation(map[string]any{"id": s.conversationID})
+	}
+	return s.loadConversations()
 }
 
 func (s *TUIState) loadNotifications() error {
@@ -3324,13 +3528,42 @@ func (s *TUIState) openGroup(path string) error {
 	roots := mapsFromSlice(asSlice(out["data"]))
 	items := make([]map[string]any, 0, len(roots))
 	s.expandedThreads = make(map[string]bool)
-	for _, root := range roots {
-		var threadOut map[string]any
+
+	// Fetch every thread concurrently instead of one at a time: a busy group
+	// has dozens of threads and serial round-trips made opening it take
+	// seconds. Workers use a hook-free client copy so progress painting is not
+	// interleaved from goroutines; order is preserved by index.
+	s.progress(fmt.Sprintf("Fetching %d threads\u2026", len(roots)))
+	quiet := s.api
+	quiet.onRequest = nil
+	threadOuts := make([]map[string]any, len(roots))
+	sem := make(chan struct{}, 6)
+	var wg sync.WaitGroup
+	for i, root := range roots {
 		rootID := stringify(root["id"])
 		if rootID == "" {
 			continue
 		}
-		if err := s.api.get("/api/v1/app/threads/"+rootID, nil, &threadOut); err != nil {
+		wg.Add(1)
+		go func(i int, id string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			var threadOut map[string]any
+			if err := quiet.get("/api/v1/app/threads/"+id, nil, &threadOut); err == nil {
+				threadOuts[i] = threadOut
+			}
+		}(i, rootID)
+	}
+	wg.Wait()
+
+	for i, root := range roots {
+		rootID := stringify(root["id"])
+		if rootID == "" {
+			continue
+		}
+		threadOut := threadOuts[i]
+		if threadOut == nil {
 			root["_depth"] = 0
 			root["_last"] = true
 			items = append(items, root)
@@ -3457,7 +3690,7 @@ func (s *TUIState) handleArticleKey(key string) error {
 	case "b":
 		s.articleBodyScroll = max(0, s.articleBodyScroll-max(1, s.articlePageSize))
 	case "u":
-		s.status = "un-mark-as-read needs API support"
+		return s.markSelectedUseful()
 	case "f", "r":
 		return s.followupSelectedArticle()
 	case "+":
@@ -3479,6 +3712,27 @@ func (s *TUIState) handleArticleKey(key string) error {
 			s.articleBodyScroll = 0
 		}
 	}
+	return nil
+}
+
+// markSelectedUseful marks the selected post in the article view as useful.
+func (s *TUIState) markSelectedUseful() error {
+	if s.articleSelected < 0 || s.articleSelected >= len(s.articleNodes) {
+		return errors.New("no post selected")
+	}
+	post := s.articleNodes[s.articleSelected].Post
+	id := stringify(post["id"])
+	if id == "" || id == "<nil>" {
+		return errors.New("no post selected")
+	}
+	var out map[string]any
+	if err := s.api.post("/api/v1/app/posts/"+url.PathEscape(id)+"/useful", nil, &out); err != nil {
+		return err
+	}
+	if n, ok := asMap(out["data"])["useful_count"]; ok {
+		post["useful_count"] = n
+	}
+	s.status = firstNonEmpty(cleanInline(stringify(out["message"])), "marked useful")
 	return nil
 }
 
@@ -3891,7 +4145,7 @@ func showTUIHelp() {
 	fmt.Println("  r, reply       reply by post id")
 	fmt.Println("  c              mark selected/current group read")
 	fmt.Println("  P              edit your profile")
-	fmt.Println("  m, messages    private messages")
+	fmt.Println("  m, messages    private messages (Enter open, r reply)")
 	fmt.Println("  !, notices     notifications (Enter open, d dismiss, c clear all)")
 	fmt.Println("  t              toggle full headers for all opened posts")
 	fmt.Println("  q              quit")
@@ -3977,14 +4231,17 @@ func clearScreen() {
 		return
 	}
 	blank := strings.Repeat(" ", width)
-	fmt.Print("\033[2J\033[H" + tuiBg)
+	var b strings.Builder
+	b.Grow((width + 1) * height)
+	b.WriteString("\033[2J\033[H" + tuiBg)
 	for row := 0; row < height; row++ {
-		fmt.Print(blank)
+		b.WriteString(blank)
 		if row < height-1 {
-			fmt.Print("\n")
+			b.WriteByte('\n')
 		}
 	}
-	fmt.Print("\033[H")
+	b.WriteString("\033[H")
+	fmt.Print(b.String())
 }
 
 func withCbreakTerminal(fn func() error) error {
@@ -4084,7 +4341,9 @@ func readEscapeKey() (string, error) {
 	}
 
 	if seq[0] >= '0' && seq[0] <= '9' {
-		// Consume CSI modifier terminator such as ESC [ 1 ; 5 B without echoing it.
+		// CSI sequences such as ESC [ 5 ~ (PgUp) or ESC [ 1 ; 5 B (modified
+		// arrow). Remember the leading number so the ~-terminated keys resolve.
+		digits := string(seq[0])
 		for {
 			if _, err := os.Stdin.Read(seq[:]); err != nil {
 				return "", err
@@ -4099,7 +4358,26 @@ func readEscapeKey() (string, error) {
 			case 'D':
 				return "left", nil
 			case '~':
+				switch digits {
+				case "5":
+					return "pgup", nil
+				case "6":
+					return "pgdn", nil
+				case "1", "7":
+					return "home-key", nil
+				case "4", "8":
+					return "end-key", nil
+				}
 				return "", nil
+			}
+			if seq[0] >= '0' && seq[0] <= '9' {
+				digits += string(seq[0])
+				continue
+			}
+			if seq[0] == ';' {
+				// Modifier follows; the leading number no longer identifies the key.
+				digits = ""
+				continue
 			}
 			if (seq[0] >= 'A' && seq[0] <= 'Z') || (seq[0] >= 'a' && seq[0] <= 'z') {
 				return "", nil
