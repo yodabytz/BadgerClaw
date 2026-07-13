@@ -3137,14 +3137,17 @@ func (s *TUIState) renderBody(w *strings.Builder, width, height int) string {
 			}
 			meta += fmt.Sprintf(" u:%v", item["useful_count"])
 			metaW := clamp(width/4, 12, 34)
-			subjectW := max(18, width-18-len([]rune(connector))-metaW)
+			// The id column is padded to a fixed width; otherwise short and
+			// long ids shift the subject start and the author column with it.
+			idW := 8
+			subjectW := max(18, width-12-idW-len([]rune(connector))-metaW)
 			fmt.Fprintf(w, "%s%s%s %s  %s%s %s %s\n",
 				prefix,
 				unread,
 				fit(replyCount, 3),
 				expandMarker,
 				muted(connector),
-				muted(fmt.Sprintf("[%v]", item["id"])),
+				muted(fit(fmt.Sprintf("[%v]", item["id"]), idW)),
 				amber(fit(cleanInline(stringify(item["subject"])), subjectW)),
 				muted(fit(meta, metaW)),
 			)
