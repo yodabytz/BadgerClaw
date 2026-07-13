@@ -156,35 +156,35 @@ var themes = map[string]Theme{
 	},
 	"tokyonight-storm": {
 		Bg: bg("24283b"), StatusBg: bg("1f2335"), Text: fg("c0caf5"),
-		Accent: fg("ff9e64"), Link: fg("7dcfff"), Muted: fg("565f89"),
+		Accent: fg("7aa2f7"), Link: fg("7dcfff"), Muted: fg("565f89"),
 	},
 	"tokyonight-moon": {
 		Bg: bg("222436"), StatusBg: bg("1e2030"), Text: fg("c8d3f5"),
-		Accent: fg("ff966c"), Link: fg("86e1fc"), Muted: fg("636da6"),
+		Accent: fg("82aaff"), Link: fg("86e1fc"), Muted: fg("636da6"),
 	},
 	"catppuccin-mocha": {
 		Bg: bg("1e1e2e"), StatusBg: bg("181825"), Text: fg("cdd6f4"),
-		Accent: fg("fab387"), Link: fg("89dceb"), Muted: fg("6c7086"),
+		Accent: fg("cba6f7"), Link: fg("89dceb"), Muted: fg("6c7086"),
 	},
 	"nord": {
 		Bg: bg("2e3440"), StatusBg: bg("3b4252"), Text: fg("d8dee9"),
-		Accent: fg("d08770"), Link: fg("88c0d0"), Muted: fg("616e88"),
+		Accent: fg("88c0d0"), Link: fg("81a1c1"), Muted: fg("616e88"),
 	},
 	"one-dark": {
 		Bg: bg("282c34"), StatusBg: bg("21252b"), Text: fg("abb2bf"),
-		Accent: fg("d19a66"), Link: fg("56b6c2"), Muted: fg("5c6370"),
+		Accent: fg("c678dd"), Link: fg("56b6c2"), Muted: fg("5c6370"),
 	},
 	"dracula": {
 		Bg: bg("282a36"), StatusBg: bg("44475a"), Text: fg("f8f8f2"),
-		Accent: fg("ffb86c"), Link: fg("8be9fd"), Muted: fg("6272a4"),
+		Accent: fg("ff79c6"), Link: fg("8be9fd"), Muted: fg("6272a4"),
 	},
 	"nightfox": {
 		Bg: bg("192330"), StatusBg: bg("212e3f"), Text: fg("cdcecf"),
-		Accent: fg("f4a261"), Link: fg("63cdcf"), Muted: fg("71839b"),
+		Accent: fg("719cd6"), Link: fg("63cdcf"), Muted: fg("71839b"),
 	},
 	"everforest": {
 		Bg: bg("2d353b"), StatusBg: bg("343f44"), Text: fg("d3c6aa"),
-		Accent: fg("e69875"), Link: fg("83c092"), Muted: fg("859289"),
+		Accent: fg("a7c080"), Link: fg("7fbbb3"), Muted: fg("859289"),
 	},
 }
 
