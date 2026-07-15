@@ -2183,6 +2183,52 @@ func bodyFromFlagOrEditorWithInitial(path, intro, initial string) (string, error
 	return editorBody(path, intro, initial, 0)
 }
 
+// composeAndSend runs the edit-confirm-send cycle for the TUI so a failed send
+// never loses the draft. On send failure it shows the error and reopens the
+// editor pre-filled with what the user wrote, letting them fix and retry or
+// cancel. send returns the success status text.
+func composeAndSend(s *TUIState, intro, initial string, send func(body string) (string, error)) error {
+	draft := initial
+	for {
+		var body string
+		editErr := withNormalTerminal(func() error {
+			var e error
+			body, e = composeBodyWithInitial("", intro, draft, s.api.wrapColumns())
+			return e
+		})
+		if editErr != nil {
+			// Empty body cancels; anything else is a real editor failure.
+			if strings.Contains(editErr.Error(), "empty body") {
+				s.status = "cancelled; nothing sent"
+				return nil
+			}
+			return editErr
+		}
+		draft = body
+		if strings.TrimSpace(body) == "" {
+			s.status = "cancelled; nothing sent"
+			return nil
+		}
+		if !confirmDefaultYes("Send? Y/n: ") {
+			s.status = "held as draft; not sent"
+			return nil
+		}
+
+		status, sendErr := send(body)
+		if sendErr == nil {
+			s.status = status
+			return nil
+		}
+
+		// Keep the draft and let the user decide.
+		fmt.Print("\n" + sendErr.Error() + "\n")
+		if !confirmDefaultYes("Send failed. Edit and retry? Y/n: ") {
+			s.status = "not sent: " + cleanInline(sendErr.Error())
+			return nil
+		}
+	}
+}
+
 // composeBody is the entry point for posts, replies and messages: the same
 // editor flow, but hard-wrapped at wrapCols.
 func composeBody(path, intro string, wrapCols int) (string, error) {
@@ -3202,27 +3248,13 @@ func (s *TUIState) handle(key string) error {
 		}
 		id := s.promptInline("reply to post id: ")
 		clearScreen()
-		var body string
-		err := withNormalTerminal(func() error {
-			var bodyErr error
-			body, bodyErr = composeBody("", "Write your reply. Save and close to review.\n", s.api.wrapColumns())
-			return bodyErr
+		return composeAndSend(s, "Write your reply. Save and close to review.\n", "", func(body string) (string, error) {
+			var out map[string]any
+			if err := s.api.post("/api/v1/app/posts/"+id+"/replies", map[string]any{"body": body}, &out); err != nil {
+				return "", err
+			}
+			return stringify(out["message"]), nil
 		})
-		if err != nil {
-			return err
-		}
-		if strings.TrimSpace(body) == "" {
-			return errors.New("reply body was empty")
-		}
-		if !confirmDefaultYes("Send? Y/n: ") {
-			s.status = "reply cancelled"
-			return nil
-		}
-		var out map[string]any
-		if err := s.api.post("/api/v1/app/posts/"+id+"/replies", map[string]any{"body": body}, &out); err != nil {
-			return err
-		}
-		s.status = stringify(out["message"])
 	case "P":
 		return s.profileEditFlow()
 	case "m":
@@ -3523,31 +3555,19 @@ func (s *TUIState) postFlow() error {
 	}
 	crosspost := s.promptInline("crosspost groups, comma separated (optional): ")
 	clearScreen()
-	var body string
-	err := withNormalTerminal(func() error {
-		var bodyErr error
-		body, bodyErr = composeBody("", "Write your post. Save and close to review.\n", s.api.wrapColumns())
-		return bodyErr
-	})
-	if err != nil {
+	if err := composeAndSend(s, "Write your post. Save and close to review.\n", "", func(body string) (string, error) {
+		var out map[string]any
+		payload := map[string]any{"subject": subject, "body": body}
+		if crosspost != "" {
+			payload["crosspost_groups"] = crosspost
+		}
+		if err := s.api.post("/api/v1/app/groups/"+url.PathEscape(group)+"/posts", payload, &out); err != nil {
+			return "", err
+		}
+		return stringify(out["message"]), nil
+	}); err != nil {
 		return err
 	}
-	if strings.TrimSpace(body) == "" {
-		return errors.New("post body was empty")
-	}
-	if !confirmDefaultYes("Send? Y/n: ") {
-		s.status = "post cancelled"
-		return nil
-	}
-	var out map[string]any
-	payload := map[string]any{"subject": subject, "body": body}
-	if crosspost != "" {
-		payload["crosspost_groups"] = crosspost
-	}
-	if err := s.api.post("/api/v1/app/groups/"+url.PathEscape(group)+"/posts", payload, &out); err != nil {
-		return err
-	}
-	s.status = stringify(out["message"])
 	return s.openGroup(group)
 }
 
@@ -4126,27 +4146,15 @@ func (s *TUIState) followupSelectedArticle() error {
 		}
 		initial = quote
 	}
-	var body string
-	err := withNormalTerminal(func() error {
-		var bodyErr error
-		body, bodyErr = composeBodyWithInitial("", "Write your followup. Save and close to review.\n", initial, s.api.wrapColumns())
-		return bodyErr
-	})
-	if err != nil {
+	if err := composeAndSend(s, "Write your followup. Save and close to review.\n", initial, func(body string) (string, error) {
+		var out map[string]any
+		if err := s.api.post("/api/v1/app/posts/"+id+"/replies", map[string]any{"body": body}, &out); err != nil {
+			return "", err
+		}
+		return stringify(out["message"]), nil
+	}); err != nil {
 		return err
 	}
-	if strings.TrimSpace(body) == "" {
-		return errors.New("followup body was empty")
-	}
-	if !confirmDefaultYes("Send? Y/n: ") {
-		s.status = "followup cancelled"
-		return nil
-	}
-	var out map[string]any
-	if err := s.api.post("/api/v1/app/posts/"+id+"/replies", map[string]any{"body": body}, &out); err != nil {
-		return err
-	}
-	s.status = stringify(out["message"])
 	return s.loadArticle(s.articleRootID)
 }
 
