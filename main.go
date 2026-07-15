@@ -1454,6 +1454,45 @@ func cmdProfileEdit(api APIClient) error {
 
 	original := form
 	fields := profileFields()
+
+	// Proxy is a local, per-device setting like theme. It lives here so it can
+	// be set interactively without remembering the `proxy` command, and it
+	// applies to this running session immediately by swapping the shared
+	// client's transport.
+	fields = append(fields, profileField{
+		label: "Proxy (this device)",
+		display: func(f profileForm) string {
+			cfg, _ := loadConfig()
+			if p := strings.TrimSpace(cfg.Proxy); p != "" {
+				return p + muted("  local setting, saved immediately")
+			}
+			return muted("(none; http/socks5/socks4, saved immediately)")
+		},
+		edit: func(f *profileForm) error {
+			cfg, _ := loadConfig()
+			value, err := profilePromptInitial("proxy URL (blank or 'off' to clear): ", cfg.Proxy)
+			if err != nil {
+				return err
+			}
+			value = strings.TrimSpace(value)
+			if value == "off" || value == "none" || value == "clear" {
+				value = ""
+			}
+			transport, err := buildProxyTransport(resolveProxyValue(value))
+			if err != nil {
+				return err
+			}
+			cfg.Proxy = value
+			if err := saveConfig(cfg); err != nil {
+				return err
+			}
+			if api.client != nil {
+				api.client.Transport = transport
+			}
+			return nil
+		},
+	})
+
 	defer func() {
 		fmt.Printf("\033[%d;1H\033[0m\n", terminalHeight())
 	}()

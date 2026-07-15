@@ -33,6 +33,15 @@ func resolveProxy(cfg Config) string {
 	return ""
 }
 
+// resolveProxyValue picks the effective proxy for an explicit config value,
+// letting BADGERCLAW_PROXY still override it for the running session.
+func resolveProxyValue(cfgValue string) string {
+	if v := strings.TrimSpace(os.Getenv("BADGERCLAW_PROXY")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(cfgValue)
+}
+
 // buildProxyTransport returns an *http.Transport routed through the given proxy
 // URL. Empty means no explicit proxy, in which case the transport still honors
 // HTTP_PROXY / HTTPS_PROXY from the environment (Go's default). Supported
