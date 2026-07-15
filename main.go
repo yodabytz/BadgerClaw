@@ -2220,9 +2220,24 @@ func composeAndSend(s *TUIState, intro, initial string, send func(body string) (
 			return nil
 		}
 
-		// Keep the draft and let the user decide.
-		fmt.Print("\n" + sendErr.Error() + "\n")
-		if !confirmDefaultYes("Send failed. Edit and retry? Y/n: ") {
+		// Show why it failed on a clean screen and keep the draft, so the user
+		// reads the reason and can fix it instead of losing what they wrote.
+		retry := false
+		_ = withNormalTerminal(func() error {
+			clearScreen()
+			fmt.Print(tuiBg + tuiText)
+			printTableHeader("Could not send", terminalWidth())
+			fmt.Println()
+			for _, line := range wrapLines(sendErr.Error(), terminalWidth()-2) {
+				fmt.Println("  " + line)
+			}
+			fmt.Println()
+			fmt.Println(muted("  Your draft is kept. Edit it and try again, or cancel to keep it aside."))
+			fmt.Print("\033[0m")
+			retry = confirmDefaultYes("\nEdit and retry? Y/n: ")
+			return nil
+		})
+		if !retry {
 			s.status = "not sent: " + cleanInline(sendErr.Error())
 			return nil
 		}
