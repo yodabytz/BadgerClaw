@@ -219,3 +219,36 @@ func TestParseCustomHeaders(t *testing.T) {
 		t.Fatal("empty should parse to none")
 	}
 }
+
+func TestBuildProxyTransport(t *testing.T) {
+	if _, err := buildProxyTransport(""); err != nil {
+		t.Fatalf("empty proxy should be fine: %v", err)
+	}
+	for _, ok := range []string{
+		"http://127.0.0.1:8080", "https://p:8080", "socks5://127.0.0.1:9050",
+		"socks5h://h:1", "socks4://127.0.0.1:1080", "socks4a://h:1080",
+		"127.0.0.1:9050", // shorthand -> socks5
+	} {
+		if _, err := buildProxyTransport(ok); err != nil {
+			t.Errorf("scheme %q should build: %v", ok, err)
+		}
+	}
+	if _, err := buildProxyTransport("ftp://x:1"); err == nil {
+		t.Error("unsupported scheme should error")
+	}
+}
+
+func TestResolveProxyPrecedence(t *testing.T) {
+	t.Setenv("BADGERCLAW_PROXY", "socks5://env:1")
+	t.Setenv("ALL_PROXY", "socks5://all:1")
+	if got := resolveProxy(Config{Proxy: "socks5://cfg:1"}); got != "socks5://env:1" {
+		t.Fatalf("BADGERCLAW_PROXY must win, got %q", got)
+	}
+	t.Setenv("BADGERCLAW_PROXY", "")
+	if got := resolveProxy(Config{Proxy: "socks5://cfg:1"}); got != "socks5://cfg:1" {
+		t.Fatalf("config should win over ALL_PROXY, got %q", got)
+	}
+	if got := resolveProxy(Config{}); got != "socks5://all:1" {
+		t.Fatalf("ALL_PROXY fallback, got %q", got)
+	}
+}

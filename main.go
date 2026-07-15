@@ -213,6 +213,7 @@ type Config struct {
 	User        string `json:"user,omitempty"`
 	WrapColumns *int   `json:"wrap_columns,omitempty"`
 	Theme       string `json:"theme,omitempty"`
+	Proxy       string `json:"proxy,omitempty"`
 }
 
 type APIClient struct {
@@ -241,9 +242,14 @@ func main() {
 		cfg.BaseURL = envOrDefault("ROOTBADGER_URL", defaultURL)
 	}
 	applyTheme(cfg.Theme)
+	transport, proxyErr := buildProxyTransport(resolveProxy(cfg))
+	if proxyErr != nil {
+		fmt.Fprintln(os.Stderr, "error:", proxyErr)
+		os.Exit(1)
+	}
 	api := APIClient{
 		cfg:    cfg,
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: &http.Client{Timeout: 30 * time.Second, Transport: transport},
 	}
 
 	if len(os.Args) < 2 {
@@ -322,6 +328,8 @@ func main() {
 		err = runTUI(api)
 	case "theme":
 		err = cmdTheme(os.Args[2:])
+	case "proxy":
+		err = cmdProxy(os.Args[2:])
 	case "doctor":
 		err = cmdDoctor(api)
 	case "help", "-h", "--help":
@@ -360,6 +368,7 @@ Usage:
   badgerclaw profile [USERNAME]
   badgerclaw profile-edit
   badgerclaw theme [NAME]
+  badgerclaw proxy [URL|off]
   badgerclaw profile-update [--display-name NAME] [--bio TEXT] [--bio-file file]
                             [--website URL] [--interests "a, b"] [--signature TEXT]
                             [--signature-file file] [--organization TEXT] [--x-info TEXT]

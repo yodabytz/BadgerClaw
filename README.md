@@ -606,3 +606,23 @@ In the TUI profile editor (`P`), the Custom headers field opens your editor
 with one `Name: Value` per line. Names use letters, digits and dashes;
 built-in header names are reserved.
 
+## Proxies
+
+RootBadger CLI can route all traffic through an HTTP or SOCKS proxy, including
+Tor. Supported schemes: `http`, `https`, `socks5`, `socks5h`, `socks4`, `socks4a`
+(a bare `host:port` is treated as `socks5`).
+
+```sh
+badgerclaw proxy socks5://127.0.0.1:9050   # e.g. Tor
+badgerclaw proxy http://user:pass@host:8080
+badgerclaw proxy            # show the current proxy
+badgerclaw proxy off        # clear it
+```
+
+`BADGERCLAW_PROXY` overrides the saved value for one run; `ALL_PROXY` and the
+standard `HTTP_PROXY` / `HTTPS_PROXY` are honored as fallbacks. Use `socks5h`
+or `socks4a` to resolve DNS at the proxy (recommended with Tor so lookups do
+not leak). Note: `torsocks` does not work with this client because Go does its
+own networking below libc; use `badgerclaw proxy socks5://127.0.0.1:9050`
+instead.
+
