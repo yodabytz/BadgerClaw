@@ -4177,6 +4177,8 @@ func (s *TUIState) handleArticleKey(key string) error {
 		s.articleBodyScroll = max(0, s.articleBodyScroll-max(1, s.articlePageSize))
 	case "u":
 		return s.markSelectedUseful()
+	case "v":
+		return s.votePollFlow()
 	case "f", "r":
 		return s.followupSelectedArticle()
 	case "+":
@@ -4202,6 +4204,36 @@ func (s *TUIState) handleArticleKey(key string) error {
 }
 
 // markSelectedUseful marks the selected post in the article view as useful.
+func (s *TUIState) votePollFlow() error {
+	if s.articleSelected < 0 || s.articleSelected >= len(s.articleNodes) {
+		return nil
+	}
+	post := s.articleNodes[s.articleSelected].Post
+	poll := asMap(post["poll"])
+	if len(poll) == 0 {
+		s.status = "this post has no poll"
+		return nil
+	}
+	opts := asSlice(poll["options"])
+	choice := s.promptInline(fmt.Sprintf("vote option 1-%d (blank to cancel): ", len(opts)))
+	if strings.TrimSpace(choice) == "" {
+		s.status = "vote cancelled"
+		return nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(choice))
+	if err != nil || n < 1 || n > len(opts) {
+		s.status = "invalid option"
+		return nil
+	}
+	optID := stringify(asMap(opts[n-1])["id"])
+	var out map[string]any
+	if err := s.api.post("/api/v1/app/polls/"+url.PathEscape(stringify(poll["id"]))+"/vote", map[string]any{"poll_option_id": optID}, &out); err != nil {
+		return err
+	}
+	s.status = firstNonEmpty(stringify(out["message"]), "vote recorded")
+	return s.loadArticle(s.articleRootID)
+}
+
 func (s *TUIState) markSelectedUseful() error {
 	if s.articleSelected < 0 || s.articleSelected >= len(s.articleNodes) {
 		return errors.New("no post selected")
@@ -4345,7 +4377,57 @@ func (s *TUIState) articleBodyLines(post map[string]any, width int) []string {
 	for _, line := range displayBlockLines(postDisplayText(post), min(80, max(40, width-2))) {
 		lines = append(lines, line)
 	}
+	lines = append(lines, pollLines(post, min(80, max(40, width-2)))...)
 	return lines
+}
+
+// pollLines renders a poll attached to a post: options with vote bars once the
+// viewer has voted, otherwise numbered options with a hint to vote.
+func pollLines(post map[string]any, width int) []string {
+	poll := asMap(post["poll"])
+	if len(poll) == 0 {
+		return nil
+	}
+	opts := asSlice(poll["options"])
+	total := 0
+	if n, ok := poll["total_votes"].(float64); ok {
+		total = int(n)
+	}
+	myOpt := stringify(poll["my_option_id"])
+	voted := myOpt != "" && myOpt != "<nil>"
+
+	out := []string{"", amber("█ " + cleanInline(stringify(poll["title"]))), muted(cleanInline(stringify(poll["question"]))), ""}
+	for i, item := range opts {
+		o := asMap(item)
+		label := cleanInline(stringify(o["label"]))
+		votes := 0
+		if n, ok := o["votes"].(float64); ok {
+			votes = int(n)
+		}
+		mine := stringify(o["id"]) == myOpt
+		if voted {
+			pct := 0
+			if total > 0 {
+				pct = votes * 100 / total
+			}
+			barW := 20
+			filled := pct * barW / 100
+			bar := strings.Repeat("█", filled) + strings.Repeat("░", barW-filled)
+			marker := "  "
+			if mine {
+				marker = cyan("✓ ")
+			}
+			out = append(out, fmt.Sprintf("%s%s  %s %d%% (%d)", marker, label, cyan(bar), pct, votes))
+		} else {
+			out = append(out, fmt.Sprintf("  %s %s", cyan(fmt.Sprintf("%d.", i+1)), label))
+		}
+	}
+	if voted {
+		out = append(out, muted(fmt.Sprintf("%d votes  — press v to change your vote", total)))
+	} else {
+		out = append(out, muted("press v to vote"))
+	}
+	return out
 }
 
 func postDisplayText(post map[string]any) string {
@@ -4642,6 +4724,7 @@ func showTUIHelp() {
 	width := terminalWidth()
 	printTableHeader("RootBadger CLI Help", width)
 	fmt.Println("  u              subscribed groups")
+	fmt.Println("  v              vote in a poll (in an article)")
 	fmt.Println("  h              unread home feed")
 	fmt.Println("  g              refresh subscribed groups with new articles")
 	fmt.Println("  G              show full collapsed group hierarchy")
