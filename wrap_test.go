@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -250,5 +251,28 @@ func TestResolveProxyPrecedence(t *testing.T) {
 	}
 	if got := resolveProxy(Config{}); got != "socks5://all:1" {
 		t.Fatalf("ALL_PROXY fallback, got %q", got)
+	}
+}
+
+func TestBlockCrossHostRedirect(t *testing.T) {
+	orig, _ := http.NewRequest("GET", "https://rootbadger.com/api", nil)
+	// same host -> allowed
+	same, _ := http.NewRequest("GET", "https://rootbadger.com/other", nil)
+	if err := blockCrossHostRedirect(same, []*http.Request{orig}); err != nil {
+		t.Fatalf("same-host redirect should be allowed: %v", err)
+	}
+	// cross host (e.g. metadata service) -> refused
+	evil, _ := http.NewRequest("GET", "http://169.254.169.254/latest/meta-data/", nil)
+	if err := blockCrossHostRedirect(evil, []*http.Request{orig}); err == nil {
+		t.Fatal("cross-host redirect must be refused")
+	}
+	// loop cap
+	loop, _ := http.NewRequest("GET", "https://rootbadger.com/x", nil)
+	chain := make([]*http.Request, 5)
+	for i := range chain {
+		chain[i] = orig
+	}
+	if err := blockCrossHostRedirect(loop, chain); err == nil {
+		t.Fatal("redirect loop should be capped")
 	}
 }

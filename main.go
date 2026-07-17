@@ -236,6 +236,20 @@ func (e APIError) Error() string {
 	return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body)
 }
 
+// blockCrossHostRedirect is the http.Client redirect policy: allow same-host
+// redirects (capped), refuse redirects to any other host. This stops a
+// malicious endpoint from steering requests to internal addresses (SSRF) or
+// leaking credentials to another host.
+func blockCrossHostRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+		return fmt.Errorf("refusing cross-host redirect to %q", req.URL.Host)
+	}
+	if len(via) >= 5 {
+		return errors.New("too many redirects")
+	}
+	return nil
+}
+
 func main() {
 	cfg, _ := loadConfig()
 	if cfg.BaseURL == "" {
@@ -248,8 +262,17 @@ func main() {
 		os.Exit(1)
 	}
 	api := APIClient{
-		cfg:    cfg,
-		client: &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		cfg: cfg,
+		client: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+			// SSRF guard: never follow a redirect to a different host. A
+			// malicious or compromised endpoint could otherwise 3xx the client
+			// to an internal address (metadata service, localhost) or leak the
+			// bearer token to another host. Same-host redirects are allowed,
+			// capped to avoid loops.
+			CheckRedirect: blockCrossHostRedirect,
+		},
 	}
 
 	if len(os.Args) < 2 {
