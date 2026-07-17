@@ -359,7 +359,7 @@ Usage:
   badgerclaw headers 123
   badgerclaw search --type all|posts|groups|users|hashtags|article|message_id QUERY
   badgerclaw new rb.group.path --subject "Subject" [--body-file file] [--crosspost rb.a,rb.b]
-  badgerclaw reply POST_ID [--body-file file]
+  badgerclaw reply POST_ID [--body-file file] [--all-groups]
   badgerclaw useful POST_ID
   badgerclaw vote POST_ID --value 1|-1
   badgerclaw messages
@@ -652,6 +652,7 @@ func cmdReply(api APIClient, args []string) error {
 	fs := flag.NewFlagSet("reply", flag.ExitOnError)
 	bodyFile := fs.String("body-file", "", "body file")
 	wrap := fs.Int("wrap", -1, "hard-wrap column; 0 disables wrapping")
+	allGroups := fs.Bool("all-groups", false, "reply to all crossposted groups")
 	_ = fs.Parse(args)
 	if fs.NArg() < 1 {
 		return errors.New("post id required")
@@ -672,8 +673,12 @@ func cmdReply(api APIClient, args []string) error {
 		fmt.Println("Reply cancelled.")
 		return nil
 	}
+	replyPayload := map[string]any{"body": body}
+	if *allGroups {
+		replyPayload["followup_scope"] = "all"
+	}
 	var out map[string]any
-	err = api.post("/api/v1/app/posts/"+fs.Arg(0)+"/replies", map[string]any{"body": body}, &out)
+	err = api.post("/api/v1/app/posts/"+fs.Arg(0)+"/replies", replyPayload, &out)
 	if err != nil {
 		return err
 	}
@@ -4209,9 +4214,19 @@ func (s *TUIState) followupSelectedArticle() error {
 		}
 		initial = quote
 	}
+	followupScope := "current"
+	if groups := asSlice(post["group_paths"]); len(groups) > 1 {
+		if confirmYesNo(fmt.Sprintf("Crossposted to %d groups. Reply to all of them? y/N: ", len(groups))) {
+			followupScope = "all"
+		}
+	}
 	if err := composeAndSend(s, "Write your followup. Save and close to review.\n", initial, func(body string) (string, error) {
+		payload := map[string]any{"body": body}
+		if followupScope == "all" {
+			payload["followup_scope"] = "all"
+		}
 		var out map[string]any
-		if err := s.api.post("/api/v1/app/posts/"+id+"/replies", map[string]any{"body": body}, &out); err != nil {
+		if err := s.api.post("/api/v1/app/posts/"+id+"/replies", payload, &out); err != nil {
 			return "", err
 		}
 		return stringify(out["message"]), nil
